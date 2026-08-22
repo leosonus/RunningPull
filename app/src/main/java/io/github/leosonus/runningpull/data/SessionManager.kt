@@ -1,4 +1,4 @@
-package com.example.runningpull.data
+package io.github.leosonus.runningpull.data
 
 import android.content.Context
 import android.content.SharedPreferences

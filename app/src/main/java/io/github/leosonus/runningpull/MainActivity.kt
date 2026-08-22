@@ -1,4 +1,4 @@
-package com.example.runningpull
+package io.github.leosonus.runningpull
 
 import android.Manifest
 import android.app.DatePickerDialog
@@ -29,13 +29,13 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
 import androidx.lifecycle.lifecycleScope
-import com.example.runningpull.data.DownloadSaver
-import com.example.runningpull.data.RunningQuotes
-import com.example.runningpull.data.SessionManager
-import com.example.runningpull.fit.FitParser
-import com.example.runningpull.network.GarminAuthException
-import com.example.runningpull.network.GarminNetworkException
-import com.example.runningpull.network.GarminWebBridge
+import io.github.leosonus.runningpull.data.DownloadSaver
+import io.github.leosonus.runningpull.data.RunningQuotes
+import io.github.leosonus.runningpull.data.SessionManager
+import io.github.leosonus.runningpull.fit.FitParser
+import io.github.leosonus.runningpull.network.GarminAuthException
+import io.github.leosonus.runningpull.network.GarminNetworkException
+import io.github.leosonus.runningpull.network.GarminWebBridge
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch

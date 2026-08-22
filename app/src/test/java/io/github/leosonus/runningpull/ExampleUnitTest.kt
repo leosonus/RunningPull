@@ -1,4 +1,4 @@
-package com.example.runningpull
+package io.github.leosonus.runningpull
 
 import org.junit.Test
 

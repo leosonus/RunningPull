@@ -3,13 +3,13 @@ plugins {
 }
 
 android {
-    namespace = "com.example.runningpull"
+    namespace = "io.github.leosonus.runningpull"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.example.runningpull"
+        applicationId = "io.github.leosonus.runningpull"
         minSdk = 26
         targetSdk = 37
         versionCode = 1

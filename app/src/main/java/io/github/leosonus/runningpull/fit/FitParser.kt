@@ -1,4 +1,4 @@
-package com.example.runningpull.fit
+package io.github.leosonus.runningpull.fit
 
 import com.garmin.fit.Decode
 import com.garmin.fit.LapMesg

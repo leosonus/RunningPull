@@ -1,4 +1,4 @@
-package com.example.runningpull.data
+package io.github.leosonus.runningpull.data
 
 /** 저장 완료 시 토스트로 보여줄 러닝 명언/격언 모음. 매번 랜덤으로 하나를 뽑아 쓴다. */
 object RunningQuotes {

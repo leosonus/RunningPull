@@ -1,4 +1,4 @@
-package com.example.runningpull
+package io.github.leosonus.runningpull
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
@@ -11,7 +11,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import com.example.runningpull.data.SessionManager
+import io.github.leosonus.runningpull.data.SessionManager
 
 /**
  * Garmin Connect의 실제 로그인 페이지를 WebView로 띄워 사용자가 직접 로그인하게 하고,

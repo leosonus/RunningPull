@@ -1,4 +1,4 @@
-package com.example.runningpull.network
+package io.github.leosonus.runningpull.network
 
 import android.util.Base64
 import android.util.Log
