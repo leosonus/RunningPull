@@ -14,6 +14,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.LocalDate
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipInputStream
@@ -27,6 +28,23 @@ class GarminAuthException(message: String) : GarminApiException(message)
 
 /** 네트워크가 끊겼거나 서버가 일시적으로 실패한 상황. 잠시 뒤 재시도할 가치가 있다. */
 class GarminNetworkException(message: String) : GarminApiException(message)
+
+/** 지표 값 하나와 그 값이 **실제로 측정된 날짜**. 러닝 날짜와 몇 달 차이 날 수 있다. */
+data class DatedValue(val value: Double, val measuredDate: String)
+
+/** 지정 시점의 LT 심박수/속도. `measuredDate`는 이 값이 측정된 날. */
+data class LactateThreshold(
+    val heartRate: Double?,
+    val speedMps: Double?,
+    val measuredDate: String?
+)
+
+/** 지정 시점의 러닝 젖산 역치 파워. `measuredDate`는 이 값이 측정된 날. */
+data class ThresholdPower(
+    val watts: Double?,
+    val wattsPerKg: Double?,
+    val measuredDate: String?
+)
 
 data class GarminActivity(
     val id: Long,
@@ -357,39 +375,109 @@ class GarminWebBridge(private val webView: WebView) {
         throw GarminApiException("zip 안에서 .fit 파일을 찾지 못했습니다")
     }
 
-    /** 지정한 날짜의 VO2max 추정치를 가져온다. fit 파일에는 없는 값이라 별도 조회가 필요하다. */
-    suspend fun fetchVo2Max(date: String): Double? {
-        val url = "https://connect.garmin.com/gc-api/metrics-service/metrics/maxmet/daily/$date/$date"
+    /**
+     * 지정한 날짜 **시점의** VO2max 추정치. fit 파일에는 없는 값이라 별도 조회가 필요하다.
+     *
+     * 함정 둘:
+     * - `maxmet/latest/{date}`는 이름과 달리 **날짜를 무시하고 현재값**을 준다(실측: 3월 날짜로
+     *   불러도 8월 값이 왔다). 절대 쓰면 안 된다.
+     * - `daily/{date}/{date}`처럼 하루로 잡으면 그날 갱신이 없었을 때 빈 배열이 온다.
+     *
+     * 그래서 조금 소급한 범위로 조회하고 날짜 이전의 마지막 값을 고른다. VO2max는 LT와 달리
+     * 러닝할 때마다 거의 갱신되므로 1년까지 볼 필요 없이 90일이면 충분하다(응답 크기도 아낀다).
+     */
+    suspend fun fetchVo2Max(date: String): DatedValue? {
+        val start = LocalDate.parse(date).minusDays(VO2MAX_LOOKBACK_DAYS).toString()
+        val url = "https://connect.garmin.com/gc-api/metrics-service/metrics/maxmet/daily/$start/$date"
         val body = fetchViaPage(url, binary = false)
-        Log.d(TAG, "vo2max raw response: ${body.take(1000)}")
-        val root = parseJsonLenient(body) ?: return null
-        return findNumber(root, exactKeys = listOf("vo2MaxValue", "vo2MaxPreciseValue"))
+        Log.d(TAG, "vo2max raw response: ${body.take(600)}")
+
+        val array = try {
+            JSONArray(body)
+        } catch (e: Exception) {
+            Log.d(TAG, "vo2max 응답 파싱 실패: ${e.message}")
+            return null
+        }
+
+        var latest: DatedValue? = null
+        for (i in 0 until array.length()) {
+            val generic = array.optJSONObject(i)?.optJSONObject("generic") ?: continue
+            val calendarDate = generic.optString("calendarDate", "")
+            val value = generic.opt("vo2MaxValue") ?: generic.opt("vo2MaxPreciseValue")
+            if (calendarDate.isBlank() || value !is Number) continue
+            if (latest == null || calendarDate > latest.measuredDate) {
+                latest = DatedValue(value.toDouble(), calendarDate)
+            }
+        }
+        return latest
     }
 
-    /** 최신 Lactate Threshold(LT) 심박수/페이스를 가져온다. fit 파일에는 없는 값이라 별도 조회가 필요하다. */
-    suspend fun fetchLactateThreshold(): Pair<Double?, Double?> {
-        val url = "https://connect.garmin.com/gc-api/biometric-service/biometric/latestLactateThreshold"
+    /**
+     * 지정한 날짜 **시점의** 지표 하나를 가져온다.
+     *
+     * LT류는 매일 측정되는 값이 아니라 조건을 만족하는 러닝을 했을 때만 갱신된다. 그래서 날짜
+     * 하루로 범위를 잡으면 대부분 빈 배열이 온다(실측: 3월 한 달에 4일, 2025년 11월에 6일뿐).
+     * 그 시점에 유효했던 값을 알려면 **1년을 소급한 범위로 조회해 날짜 이전의 마지막 값**을
+     * 골라야 한다. 범위 끝이 date이므로 응답의 모든 항목은 date 이하이고, `from`이 가장 늦은
+     * 항목이 곧 "그때 유효했던 값"이다.
+     *
+     * 응답 형태: `[{"from":"2026-03-15","until":"...","series":"running","value":310.0,...}, ...]`
+     */
+    private suspend fun fetchStatAsOf(metric: String, date: String, query: String): DatedValue? {
+        val start = LocalDate.parse(date).minusYears(1).toString()
+        val url = "https://connect.garmin.com/gc-api/biometric-service/stats/$metric" +
+            "/range/$start/$date?$query"
         val body = fetchViaPage(url, binary = false)
-        Log.d(TAG, "lactate threshold raw response: ${body.take(1000)}")
-        val root = parseJsonLenient(body) ?: return null to null
-        // 실제 응답 필드명은 "hearRate"(오타), "speed"로 내려온다.
-        val heartRate = findNumber(root, exactKeys = listOf("hearRate", "heartRate"))
-        // "speed" 원본값은 실제 m/s의 1/10로 내려옴이 실측으로 확인됨
-        // (예: 0.40으로 오면 실제로는 4.0m/s). 보정해서 반환한다.
-        val speed = findNumber(root, exactKeys = listOf("speed"))?.times(10)
-        return heartRate to speed
+        Log.d(TAG, "$metric raw response: ${body.take(600)}")
+
+        val array = try {
+            JSONArray(body)
+        } catch (e: Exception) {
+            Log.d(TAG, "$metric 응답 파싱 실패: ${e.message}")
+            return null
+        }
+
+        var latest: DatedValue? = null
+        for (i in 0 until array.length()) {
+            val item = array.optJSONObject(i) ?: continue
+            val from = item.optString("from", "")
+            val value = item.opt("value")
+            if (from.isBlank() || value !is Number) continue
+            // ISO 날짜라 문자열 비교로 최신 판별이 된다.
+            if (latest == null || from > latest.measuredDate) {
+                latest = DatedValue(value.toDouble(), from)
+            }
+        }
+        return latest
     }
 
-    /** 러닝 젖산 역치 파워(FTP, W / W/kg)를 가져온다. fit 파일에는 없는 값이라 별도 조회가 필요하다. */
-    suspend fun fetchLactateThresholdPower(date: String): Pair<Double?, Double?> {
-        val url = "https://connect.garmin.com/gc-api/biometric-service/biometric/powerToWeight/latest/$date" +
-            "?sport=Running"
-        val body = fetchViaPage(url, binary = false)
-        Log.d(TAG, "lt power raw response: ${body.take(1000)}")
-        val root = parseJsonLenient(body) ?: return null to null
-        val watts = findNumber(root, exactKeys = listOf("functionalThresholdPower"))
-        val wattsPerKg = findNumber(root, exactKeys = listOf("powerToWeight"))
-        return watts to wattsPerKg
+    /**
+     * 지정한 날짜 시점의 LT 심박수/페이스를 가져온다.
+     *
+     * 예전에는 날짜 없는 `latestLactateThreshold`를 써서 **몇 달 전 러닝에도 현재 LT가 붙는**
+     * 문제가 있었다. 실측으로 3월 LT 심박수는 176~178, 현재는 173으로 실제로 다르다.
+     */
+    suspend fun fetchLactateThreshold(date: String): LactateThreshold {
+        val heartRate = fetchStatAsOf("lactateThresholdHeartRate", date, LT_QUERY)
+        val speed = fetchStatAsOf("lactateThresholdSpeed", date, LT_QUERY)
+        return LactateThreshold(
+            heartRate = heartRate?.value,
+            // 원본값은 실제 m/s의 1/10로 내려온다(예: 0.40이면 실제 4.0m/s). 보정해서 반환한다.
+            // 날짜별 엔드포인트도 같은 스케일임을 실측으로 확인했다.
+            speedMps = speed?.value?.times(10),
+            measuredDate = heartRate?.measuredDate ?: speed?.measuredDate
+        )
+    }
+
+    /** 지정한 날짜 시점의 러닝 젖산 역치 파워(FTP, W / W/kg)를 가져온다. */
+    suspend fun fetchLactateThresholdPower(date: String): ThresholdPower {
+        val watts = fetchStatAsOf("functionalThresholdPower", date, POWER_QUERY)
+        val perKg = fetchStatAsOf("powerToWeight", date, POWER_QUERY)
+        return ThresholdPower(
+            watts = watts?.value,
+            wattsPerKg = perKg?.value,
+            measuredDate = watts?.measuredDate ?: perKg?.measuredDate
+        )
     }
 
     private fun parseJsonLenient(body: String): Any? = try {
@@ -443,6 +531,12 @@ class GarminWebBridge(private val webView: WebView) {
         private const val TEXT_TIMEOUT_MS = 30_000L
         private const val BINARY_TIMEOUT_MS = 120_000L
         private const val MAX_ATTEMPTS = 3
+
+        // 웹이 실제로 쓰는 쿼리 그대로. sport 값의 대소문자가 지표마다 다르니 건드리지 말 것
+        // (LT는 RUNNING, 파워는 Running).
+        private const val LT_QUERY = "aggregation=daily&aggregationStrategy=LATEST&sport=RUNNING"
+        private const val POWER_QUERY = "aggregation=daily&sport=Running"
+        private const val VO2MAX_LOOKBACK_DAYS = 90L
         private val RETRY_DELAYS_MS = longArrayOf(1_000L, 3_000L)
 
         private fun isSignInUrl(url: String): Boolean =

@@ -233,15 +233,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // VO2max/LT는 활동이 아니라 계정 단위 지표라 하루에 한 번만 조회해서
+        // VO2max/LT는 개별 활동이 아니라 날짜 단위 지표라 하루에 한 번만 조회해서
         // 아래에서 러닝마다 각자의 JSON에 똑같이 붙여준다. 이 지표들은 없어도 러닝 자체는
         // 저장할 수 있으니, 실패하면 JSON에 오류 문구만 남기고 계속 진행한다.
         statusText.text = "VO2max / LT 조회 중..."
 
         var vo2Max: Double? = null
+        var vo2MaxMeasuredDate: String? = null
         var vo2MaxError: String? = null
         try {
-            vo2Max = webBridge.fetchVo2Max(targetDate)
+            val maxMet = webBridge.fetchVo2Max(targetDate)
+            vo2Max = maxMet?.value
+            vo2MaxMeasuredDate = maxMet?.measuredDate
         } catch (e: GarminAuthException) {
             throw e
         } catch (e: CancellationException) {
@@ -252,11 +255,13 @@ class MainActivity : AppCompatActivity() {
 
         var ltHeartRate: Double? = null
         var ltPace: String? = null
+        var ltMeasuredDate: String? = null
         var ltError: String? = null
         try {
-            val (heartRate, speed) = webBridge.fetchLactateThreshold()
-            ltHeartRate = heartRate
-            ltPace = speed?.let { formatPace(it) }
+            val lt = webBridge.fetchLactateThreshold(targetDate)
+            ltHeartRate = lt.heartRate
+            ltPace = lt.speedMps?.let { formatPace(it) }
+            ltMeasuredDate = lt.measuredDate
         } catch (e: GarminAuthException) {
             throw e
         } catch (e: CancellationException) {
@@ -267,11 +272,13 @@ class MainActivity : AppCompatActivity() {
 
         var ltPowerWatts: Double? = null
         var ltPowerPerKg: Double? = null
+        var ltPowerMeasuredDate: String? = null
         var ltPowerError: String? = null
         try {
-            val (watts, perKg) = webBridge.fetchLactateThresholdPower(targetDate)
-            ltPowerWatts = watts
-            ltPowerPerKg = perKg?.let { Math.round(it * 100) / 100.0 }
+            val power = webBridge.fetchLactateThresholdPower(targetDate)
+            ltPowerWatts = power.watts
+            ltPowerPerKg = power.wattsPerKg?.let { Math.round(it * 100) / 100.0 }
+            ltPowerMeasuredDate = power.measuredDate
         } catch (e: GarminAuthException) {
             throw e
         } catch (e: CancellationException) {
@@ -295,12 +302,17 @@ class MainActivity : AppCompatActivity() {
                     put("activityName", run.name)
                     put("activityDate", targetDate)
                     vo2Max?.let { put("vo2Max", it) }
+                    vo2MaxMeasuredDate?.let { put("vo2MaxMeasuredDate", it) }
                     vo2MaxError?.let { put("vo2MaxError", it) }
                     ltHeartRate?.let { put("lactateThresholdHeartRate", it) }
                     ltPace?.let { put("lactateThresholdPacePerKm", it) }
+                    // 이 LT가 실제로 측정된 날. 러닝 날짜와 몇 달 차이 날 수 있으므로,
+                    // 나중에 분석할 때 값이 얼마나 오래된 것인지 구분하려면 이게 있어야 한다.
+                    ltMeasuredDate?.let { put("lactateThresholdMeasuredDate", it) }
                     ltError?.let { put("lactateThresholdError", it) }
                     ltPowerWatts?.let { put("lactateThresholdPowerWatts", it) }
                     ltPowerPerKg?.let { put("lactateThresholdPowerPerKg", it) }
+                    ltPowerMeasuredDate?.let { put("lactateThresholdPowerMeasuredDate", it) }
                     ltPowerError?.let { put("lactateThresholdPowerError", it) }
                 }
 
