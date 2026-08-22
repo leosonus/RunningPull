@@ -30,11 +30,6 @@ Garmin은 공개 API가 없어서 웹 로그인 흐름을 그대로 쓴다.
 
 minSdk 26 / targetSdk 37. 별도 설정이나 API 키는 필요 없다.
 
-## 문서
-
-- [skills/PLAN.md](skills/PLAN.md) — 목표, 아키텍처, 확인된 API 엔드포인트 목록
-- [skills/PROGRESS.md](skills/PROGRESS.md) — 단계별 진행 기록과 트러블슈팅
-
 ## 참고
 
 문서화되지 않은 내부 API를 쓰기 때문에 Garmin이 응답 구조나 로그인 흐름을 바꾸면 깨진다.
