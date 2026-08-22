@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Garmin 로그인 리다이렉트 체인 중간에 http로 잠깐 튀는 홉이 있어(예: /signin),
+         해당 도메인들만 cleartext를 허용한다. 그 외 모든 트래픽은 기본 정책(HTTPS만) 유지. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">garmin.com</domain>
+    </domain-config>
+</network-security-config>

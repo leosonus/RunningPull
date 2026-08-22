@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <color name="health_blue">#07A8DC</color>
+    <color name="health_teal">#08C490</color>
+    <color name="health_green">#8ED84A</color>
+    <color name="health_blue_dark">#0679A8</color>
+    <color name="health_on_primary">#FFFFFF</color>
+</resources>

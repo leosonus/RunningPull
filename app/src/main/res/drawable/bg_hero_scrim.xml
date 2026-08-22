@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  히어로 이미지 아래쪽에 덮는 그라디언트. 아래로 갈수록 시트 색으로 짙어져서
+  이미지가 시트에 자연스럽게 녹아들고, 겹치는 경계선도 눈에 띄지 않게 된다.
+  angle=90 은 아래에서 위로 향하므로 startColor(아래)가 시트 색, endColor(위)가 투명이다.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <gradient
+        android:type="linear"
+        android:angle="90"
+        android:startColor="?attr/colorSurface"
+        android:endColor="@android:color/transparent" />
+
+</shape>
