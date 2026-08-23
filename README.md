@@ -9,6 +9,17 @@ Garmin Connect에서 매번 손으로 fit 파일을 내려받던 걸 없애려�
 Downloads/strongRunner/웜업러닝_20260820_194125.json
 ```
 
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/login.png" width="300" alt="시작 화면"></td>
+    <td align="center"><img src="docs/screenshots/main.png" width="300" alt="메인 화면"></td>
+  </tr>
+  <tr>
+    <td align="center">시작 화면</td>
+    <td align="center">날짜를 고르고 가져오기</td>
+  </tr>
+</table>
+
 ## 어떻게 동작하나
 
 Garmin은 공개 API가 없어서 웹 로그인 흐름을 그대로 쓴다.
