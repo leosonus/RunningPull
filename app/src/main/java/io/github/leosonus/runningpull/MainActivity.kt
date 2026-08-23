@@ -33,15 +33,20 @@ import io.github.leosonus.runningpull.data.DownloadSaver
 import io.github.leosonus.runningpull.data.RunningQuotes
 import io.github.leosonus.runningpull.data.SessionManager
 import io.github.leosonus.runningpull.fit.FitParser
+import io.github.leosonus.runningpull.fit.FitResult
 import io.github.leosonus.runningpull.network.GarminAuthException
 import io.github.leosonus.runningpull.network.GarminNetworkException
 import io.github.leosonus.runningpull.network.GarminWebBridge
+import io.github.leosonus.runningpull.weather.WeatherClient
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.CancellationException
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
@@ -297,7 +302,8 @@ class MainActivity : AppCompatActivity() {
                 val fitBytes = webBridge.downloadFitFile(run.id)
 
                 statusText.text = "$label \"${run.name}\" JSON으로 변환 중..."
-                val json = FitParser.parseToJson(fitBytes).apply {
+                val fit = FitParser.parse(fitBytes)
+                val json = fit.json.apply {
                     put("activityId", run.id)
                     put("activityName", run.name)
                     put("activityDate", targetDate)
@@ -316,6 +322,9 @@ class MainActivity : AppCompatActivity() {
                     ltPowerError?.let { put("lactateThresholdPowerError", it) }
                 }
 
+                statusText.text = "$label \"${run.name}\" 날씨 조회 중..."
+                applyWeather(json, fit)
+
                 val fileName =
                     "${sanitizeFileNamePart(run.name)}_${dateTimeSuffix(run.startTimeLocal)}.json"
                 DownloadSaver.saveJson(this@MainActivity, fileName, json.toString(2))
@@ -332,6 +341,64 @@ class MainActivity : AppCompatActivity() {
         statusText.text = buildResultSummary(savedFileNames, failures)
         if (savedFileNames.isNotEmpty()) showQuoteToast(RunningQuotes.random())
     }
+
+    /**
+     * 러닝 좌표와 시각으로 그때의 기온·습도를 붙인다. fit의 시계 온도계는 값이 비어 있는 데다
+     * 손목 체온에 영향을 받아, 실제 기온은 위치 기반 기상 데이터로 받아온다.
+     *
+     * 원본이 정시 단위라 5km 지점마다 보간해서 넣는다. 짧은 러닝은 값이 거의 같지만,
+     * 새벽에 시작하는 장거리는 구간별로 확실히 달라진다.
+     *
+     * 날씨는 있으면 좋은 정보라 실패해도 러닝 저장 자체는 막지 않는다.
+     */
+    private suspend fun applyWeather(json: JSONObject, fit: FitResult) {
+        val latitude = fit.startLatitude
+        val longitude = fit.startLongitude
+        val startTime = fit.startTimeUtc
+        if (latitude == null || longitude == null || startTime == null) {
+            // 트레드밀처럼 GPS가 없는 러닝. 오류가 아니므로 조용히 건너뛴다.
+            json.put("weatherSkippedReason", "위치 정보가 없는 러닝입니다 (실내/트레드밀 등)")
+            return
+        }
+
+        try {
+            val weather = WeatherClient.fetchHourly(latitude, longitude, startTime)
+            json.put("weather", JSONObject().apply {
+                put("source", "open-meteo archive (ERA5)")
+                put("latitude", round2(weather.latitude))
+                put("longitude", round2(weather.longitude))
+                weather.temperatureAt(startTime)?.let { put("startTemperatureC", round1(it)) }
+                weather.humidityAt(startTime)?.let { put("startHumidityPct", round1(it)) }
+                fit.endTimeUtc?.let { end ->
+                    weather.temperatureAt(end)?.let { put("endTemperatureC", round1(it)) }
+                    weather.humidityAt(end)?.let { put("endHumidityPct", round1(it)) }
+                }
+            })
+
+            if (fit.splits.isNotEmpty()) {
+                json.put("weatherSplits", JSONArray().apply {
+                    fit.splits.forEach { split ->
+                        put(JSONObject().apply {
+                            put("distanceKm", split.distanceKm)
+                            put("time", ISO_UTC.format(split.timeUtc))
+                            weather.temperatureAt(split.timeUtc)
+                                ?.let { put("temperatureC", round1(it)) }
+                            weather.humidityAt(split.timeUtc)
+                                ?.let { put("humidityPct", round1(it)) }
+                        })
+                    }
+                })
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            json.put("weatherError", e.message ?: e.toString())
+        }
+    }
+
+    private fun round1(value: Double): Double = Math.round(value * 10) / 10.0
+
+    private fun round2(value: Double): Double = Math.round(value * 100) / 100.0
 
     private fun buildResultSummary(saved: List<String>, failures: List<String>): String {
         val summary = StringBuilder()
@@ -470,5 +537,10 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+
+        /** 날씨 구간의 시각 표기. fit 타임스탬프와 같은 UTC 기준으로 맞춘다. */
+        private val ISO_UTC = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
     }
 }
