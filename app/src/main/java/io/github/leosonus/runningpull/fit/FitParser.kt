@@ -81,6 +81,14 @@ object FitParser {
     /** 몇 미터마다 날씨 지점을 찍을지. MainActivity의 weather.samplingIntervalM에도 그대로 쓴다. */
     const val SPLIT_INTERVAL_M = 5000f
 
+    /**
+     * records[]를 몇 초 간격으로 남길지. fit은 보통 1초마다 record가 찍히는데, 그대로 다 담으면
+     * (예: 50분 러닝 → 3000개) JSON이 지나치게 커진다. 분석에 필요한 추세는 10초 간격으로도
+     * 충분히 보이므로 다운샘플링한다. 시작 record와 마지막(결승) record는 간격에 안 맞아도
+     * 항상 포함한다.
+     */
+    private const val RECORD_SAMPLE_INTERVAL_SEC = 10L
+
     fun parse(fitBytes: ByteArray): FitResult {
         val sessions = mutableListOf<SessionMesg>()
         val laps = mutableListOf<LapMesg>()
@@ -92,6 +100,9 @@ object FitParser {
         var firstLongitude: Double? = null
         var firstSplitEmitted = false
         var lastRecordTime: Date? = null
+        var totalFitRecordCount = 0
+        var nextRecordSampleTimeMs: Long? = null
+        var lastRunningRecord: RunningRecord? = null
 
         val broadcaster = MesgBroadcaster(Decode())
         broadcaster.addListener(SessionMesgListener { sessions.add(it) })
@@ -109,7 +120,14 @@ object FitParser {
 
             val distance = record.distance
             if (time != null) {
-                records.add(record.toRunningRecord(time))
+                totalFitRecordCount++
+                val runningRecord = record.toRunningRecord(time)
+                lastRunningRecord = runningRecord
+                val threshold = nextRecordSampleTimeMs
+                if (threshold == null || time.time >= threshold) {
+                    records.add(runningRecord)
+                    nextRecordSampleTimeMs = time.time + RECORD_SAMPLE_INTERVAL_SEC * 1000L
+                }
             }
 
             if (distance == null || time == null) return@RecordMesgListener
@@ -132,6 +150,12 @@ object FitParser {
             broadcaster.run(ByteArrayInputStream(fitBytes))
         } catch (e: Exception) {
             throw FitParseException("fit 파일 파싱 실패: ${e.message}")
+        }
+
+        // 결승 시점 record가 10초 간격에 안 맞아 빠졌을 수 있으니 항상 마지막 record를 보장한다.
+        val finalRecord = lastRunningRecord
+        if (finalRecord != null && records.lastOrNull()?.timestampUtc != finalRecord.timestampUtc) {
+            records.add(finalRecord)
         }
 
         val session = sessions.firstOrNull()
@@ -172,7 +196,9 @@ object FitParser {
             putIfNotNull("totalStrides", session.totalStrides)
         })
         json.put("source", JSONObject().apply {
-            put("fitRecordCount", records.size)
+            put("fitRecordCount", totalFitRecordCount)
+            put("recordsIncludedCount", records.size)
+            put("recordSamplingIntervalSec", RECORD_SAMPLE_INTERVAL_SEC)
             put("fitTemperatureAvailable", session.avgTemperature != null)
         })
         json.put("laps", JSONArray().apply {
@@ -266,7 +292,8 @@ object FitParser {
         putIfNotNull("deviceMinTemperatureC", session.minTemperature?.toDouble())
     }
 
-    /** record 타임스탬프 간격의 중앙값(초). 대부분 1초 간격이지만 기기·설정에 따라 다를 수 있다. */
+    /** records[]에 남은 항목들의 타임스탬프 간격 중앙값(초). 다운샘플링 결과라 보통
+     * RECORD_SAMPLE_INTERVAL_SEC(10)에 가깝다. */
     private fun buildTimingBlock(session: SessionMesg, records: List<RunningRecord>): JSONObject =
         JSONObject().apply {
             putIfNotNull("startTimeUtc", session.startTime?.date?.toIso())
