@@ -22,11 +22,40 @@ class HourlyWeather(
     val longitude: Double,
     private val timesUtcMillis: List<Long>,
     private val temperaturesC: List<Double?>,
-    private val humidityPct: List<Double?>
+    private val humidityPct: List<Double?>,
+    private val dewPointC: List<Double?>,
+    private val feelsLikeC: List<Double?>,
+    private val windSpeedMps: List<Double?>,
+    private val windDirectionDeg: List<Double?>
 ) {
     fun temperatureAt(time: Date): Double? = interpolate(time, temperaturesC)
 
     fun humidityAt(time: Date): Double? = interpolate(time, humidityPct)
+
+    fun dewPointAt(time: Date): Double? = interpolate(time, dewPointC)
+
+    fun feelsLikeAt(time: Date): Double? = interpolate(time, feelsLikeC)
+
+    fun windSpeedAt(time: Date): Double? = interpolate(time, windSpeedMps)
+
+    /** 풍향은 0~360도를 도는 값이라 선형보간하면 359°↔1° 사이에서 180°로 튀는 오류가 난다.
+     * 그래서 가장 가까운 시각의 값을 그대로 쓴다(다른 값들처럼 보간하지 않음). */
+    fun windDirectionAt(time: Date): Double? = nearest(time, windDirectionDeg)
+
+    private fun nearest(time: Date, values: List<Double?>): Double? {
+        if (timesUtcMillis.isEmpty()) return null
+        val target = time.time
+        var bestIndex = 0
+        var bestDiff = Long.MAX_VALUE
+        for (i in timesUtcMillis.indices) {
+            val diff = Math.abs(timesUtcMillis[i] - target)
+            if (diff < bestDiff) {
+                bestDiff = diff
+                bestIndex = i
+            }
+        }
+        return values.getOrNull(bestIndex)
+    }
 
     private fun interpolate(time: Date, values: List<Double?>): Double? {
         if (timesUtcMillis.isEmpty()) return null
@@ -79,7 +108,8 @@ object WeatherClient {
             val url = "https://archive-api.open-meteo.com/v1/archive" +
                 "?latitude=$latitude&longitude=$longitude" +
                 "&start_date=$start&end_date=$end" +
-                "&hourly=temperature_2m,relative_humidity_2m&timezone=UTC"
+                "&hourly=temperature_2m,relative_humidity_2m,dew_point_2m,apparent_temperature," +
+                "wind_speed_10m,wind_direction_10m&timezone=UTC"
 
             val body = get(url)
             val root = try {
@@ -97,6 +127,11 @@ object WeatherClient {
             val times = hourly.optJSONArray("time")
             val temps = hourly.optJSONArray("temperature_2m")
             val humidity = hourly.optJSONArray("relative_humidity_2m")
+            val dewPoint = hourly.optJSONArray("dew_point_2m")
+            val feelsLike = hourly.optJSONArray("apparent_temperature")
+            // Open-Meteo는 풍속을 km/h로 준다. m/s로 통일하려면 ÷3.6 해야 한다.
+            val windSpeedKmh = hourly.optJSONArray("wind_speed_10m")
+            val windDirection = hourly.optJSONArray("wind_direction_10m")
             if (times == null || times.length() == 0) {
                 throw WeatherException("조회한 기간의 날씨 데이터가 비어 있습니다")
             }
@@ -104,11 +139,19 @@ object WeatherClient {
             val timeMillis = ArrayList<Long>(times.length())
             val tempList = ArrayList<Double?>(times.length())
             val humidityList = ArrayList<Double?>(times.length())
+            val dewPointList = ArrayList<Double?>(times.length())
+            val feelsLikeList = ArrayList<Double?>(times.length())
+            val windSpeedList = ArrayList<Double?>(times.length())
+            val windDirectionList = ArrayList<Double?>(times.length())
             for (i in 0 until times.length()) {
                 val parsed = HOUR_FORMAT.parse(times.optString(i)) ?: continue
                 timeMillis.add(parsed.time)
                 tempList.add((temps?.opt(i) as? Number)?.toDouble())
                 humidityList.add((humidity?.opt(i) as? Number)?.toDouble())
+                dewPointList.add((dewPoint?.opt(i) as? Number)?.toDouble())
+                feelsLikeList.add((feelsLike?.opt(i) as? Number)?.toDouble())
+                windSpeedList.add((windSpeedKmh?.opt(i) as? Number)?.toDouble()?.div(3.6))
+                windDirectionList.add((windDirection?.opt(i) as? Number)?.toDouble())
             }
 
             HourlyWeather(
@@ -118,7 +161,11 @@ object WeatherClient {
                 longitude = root.optDouble("longitude", longitude),
                 timesUtcMillis = timeMillis,
                 temperaturesC = tempList,
-                humidityPct = humidityList
+                humidityPct = humidityList,
+                dewPointC = dewPointList,
+                feelsLikeC = feelsLikeList,
+                windSpeedMps = windSpeedList,
+                windDirectionDeg = windDirectionList
             )
         }
 

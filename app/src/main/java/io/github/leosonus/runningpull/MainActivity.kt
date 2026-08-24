@@ -45,6 +45,7 @@ import org.json.JSONObject
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import kotlin.math.roundToInt
@@ -260,12 +261,14 @@ class MainActivity : AppCompatActivity() {
 
         var ltHeartRate: Double? = null
         var ltPace: String? = null
+        var ltPaceSecPerKm: Double? = null
         var ltMeasuredDate: String? = null
         var ltError: String? = null
         try {
             val lt = webBridge.fetchLactateThreshold(targetDate)
             ltHeartRate = lt.heartRate
             ltPace = lt.speedMps?.let { formatPace(it) }
+            ltPaceSecPerKm = lt.speedMps?.let { if (it > 0) 1000.0 / it else null }
             ltMeasuredDate = lt.measuredDate
         } catch (e: GarminAuthException) {
             throw e
@@ -292,6 +295,20 @@ class MainActivity : AppCompatActivity() {
             ltPowerError = e.message ?: e.toString()
         }
 
+        // 러닝 심박 존 계산에 쓰이는 최대심박수. 날짜 파라미터가 없어 항상 "현재" 설정값이다
+        // (VO2max/LT처럼 그 시점 값을 못 가져온다 — GarminWebBridge.fetchMaximumHeartRate 참고).
+        var maxHeartRateBpm: Double? = null
+        var maxHeartRateError: String? = null
+        try {
+            maxHeartRateBpm = webBridge.fetchMaximumHeartRate()
+        } catch (e: GarminAuthException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            maxHeartRateError = e.message ?: e.toString()
+        }
+
         val savedFileNames = mutableListOf<String>()
         val failures = mutableListOf<String>()
 
@@ -304,22 +321,97 @@ class MainActivity : AppCompatActivity() {
                 statusText.text = "$label \"${run.name}\" JSON으로 변환 중..."
                 val fit = FitParser.parse(fitBytes)
                 val json = fit.json.apply {
-                    put("activityId", run.id)
-                    put("activityName", run.name)
-                    put("activityDate", targetDate)
-                    vo2Max?.let { put("vo2Max", it) }
-                    vo2MaxMeasuredDate?.let { put("vo2MaxMeasuredDate", it) }
-                    vo2MaxError?.let { put("vo2MaxError", it) }
-                    ltHeartRate?.let { put("lactateThresholdHeartRate", it) }
-                    ltPace?.let { put("lactateThresholdPacePerKm", it) }
-                    // 이 LT가 실제로 측정된 날. 러닝 날짜와 몇 달 차이 날 수 있으므로,
-                    // 나중에 분석할 때 값이 얼마나 오래된 것인지 구분하려면 이게 있어야 한다.
-                    ltMeasuredDate?.let { put("lactateThresholdMeasuredDate", it) }
-                    ltError?.let { put("lactateThresholdError", it) }
-                    ltPowerWatts?.let { put("lactateThresholdPowerWatts", it) }
-                    ltPowerPerKg?.let { put("lactateThresholdPowerPerKg", it) }
-                    ltPowerMeasuredDate?.let { put("lactateThresholdPowerMeasuredDate", it) }
-                    ltPowerError?.let { put("lactateThresholdPowerError", it) }
+                    put("schemaVersion", SCHEMA_VERSION)
+                    put("schemaPurpose", "SELF_CONTAINED_RUNNING_ANALYSIS_FOR_AI")
+
+                    getJSONObject("source").apply {
+                        put("activityFitFile", "${run.id}_ACTIVITY.fit")
+                        put("externalEnrichment", JSONArray(listOf("GARMIN_CONNECT_OR_PROFILE", "WEATHER_API")))
+                        put(
+                            "provenanceNote",
+                            "Activity/lap/record metrics come from the activity FIT unless " +
+                                "otherwise stated. VO2max and lactate-threshold metrics are " +
+                                "contextual metrics stored with the activity so an AI can " +
+                                "analyze the run without relying on conversation memory."
+                        )
+                    }
+                    getJSONObject("activity").apply {
+                        put("activityId", run.id)
+                        put("activityName", run.name)
+                        put("activityDate", targetDate)
+                    }
+
+                    put("athleteContext", JSONObject().apply {
+                        put("snapshotDate", targetDate)
+                        maxHeartRateBpm?.let {
+                            put("maximumHeartRate", JSONObject().apply {
+                                put("bpm", it)
+                                put("source", "GARMIN_HEART_RATE_ZONES_RUNNING")
+                                put(
+                                    "note",
+                                    "biometric-service/heartRateZones의 RUNNING 항목 " +
+                                        "maxHeartRateUsed. 날짜 파라미터가 없어 조회 시점의 " +
+                                        "현재 설정값이며(과거 러닝이어도 동일), 프로필 화면에 " +
+                                        "보이는 값과 소폭 다를 수 있다."
+                                )
+                            })
+                        }
+                        maxHeartRateError?.let { put("maximumHeartRateError", it) }
+                        vo2Max?.let {
+                            put("vo2Max", JSONObject().apply {
+                                put("value", it)
+                                vo2MaxMeasuredDate?.let { d -> put("measuredDate", d) }
+                                put("source", "GARMIN_CONNECT_OR_PROFILE")
+                            })
+                        }
+                        vo2MaxError?.let { put("vo2MaxError", it) }
+                        if (ltHeartRate != null || ltPace != null || ltPowerWatts != null) {
+                            put("lactateThreshold", JSONObject().apply {
+                                ltHeartRate?.let { put("heartRateBpm", it) }
+                                ltPace?.let { put("pacePerKm", it) }
+                                ltPaceSecPerKm?.let { put("paceSecPerKm", round1(it)) }
+                                ltPowerWatts?.let { put("powerWatts", it) }
+                                ltPowerPerKg?.let { put("powerPerKg", it) }
+                                (ltMeasuredDate ?: ltPowerMeasuredDate)?.let { put("measuredDate", it) }
+                                put("source", "GARMIN_CONNECT_OR_PROFILE")
+                            })
+                        }
+                        ltError?.let { put("lactateThresholdError", it) }
+                        ltPowerError?.let { put("lactateThresholdPowerError", it) }
+                    })
+
+                    getJSONObject("heartRate").apply {
+                        ltHeartRate?.let { put("lactateThresholdHeartRateBpm", it) }
+                    }
+                    getJSONObject("power").apply {
+                        ltPowerWatts?.let { put("lactateThresholdPowerW", it) }
+                    }
+
+                    put("physiology", JSONObject().apply {
+                        put("source", "GARMIN_PROFILE_OR_API_NOT_ACTIVITY_FIT")
+                        vo2Max?.let { put("vo2Max", it) }
+                        vo2MaxMeasuredDate?.let { put("vo2MaxMeasuredDate", it) }
+                        ltHeartRate?.let { put("lactateThresholdHeartRateBpm", it) }
+                        ltPace?.let { put("lactateThresholdPacePerKm", it) }
+                        ltMeasuredDate?.let { put("lactateThresholdMeasuredDate", it) }
+                        ltPowerWatts?.let { put("lactateThresholdPowerW", it) }
+                        ltPowerPerKg?.let { put("lactateThresholdPowerPerKg", it) }
+                    })
+
+                    put(
+                        "derivedIntensityContext",
+                        buildDerivedIntensityContext(
+                            avgHeartRate = fit.avgHeartRate,
+                            maxHeartRateActivity = fit.maxHeartRate,
+                            maxHeartRateConfigured = maxHeartRateBpm,
+                            ltHeartRate = ltHeartRate,
+                            avgPowerWatts = fit.avgPowerWatts,
+                            normalizedPowerWatts = fit.normalizedPowerWatts,
+                            ltPowerWatts = ltPowerWatts,
+                            avgPaceSecPerKm = fit.avgPaceSecPerKm,
+                            ltPaceSecPerKm = ltPaceSecPerKm
+                        )
+                    )
                 }
 
                 statusText.text = "$label \"${run.name}\" 날씨 조회 중..."
@@ -357,43 +449,111 @@ class MainActivity : AppCompatActivity() {
         val startTime = fit.startTimeUtc
         if (latitude == null || longitude == null || startTime == null) {
             // 트레드밀처럼 GPS가 없는 러닝. 오류가 아니므로 조용히 건너뛴다.
-            json.put("weatherSkippedReason", "위치 정보가 없는 러닝입니다 (실내/트레드밀 등)")
+            json.put("weather", JSONObject().apply {
+                put("source", "NONE")
+                put("samplingIntervalM", FitParser.SPLIT_INTERVAL_M.toInt())
+                put("FITContainsTemperature", fit.fitTemperatureAvailable)
+                put("samples", JSONArray())
+                put("skippedReason", "위치 정보가 없는 러닝입니다 (실내/트레드밀 등)")
+            })
             return
         }
 
+        val fetchedAtUtc = ISO_UTC.format(Date())
         try {
             val weather = WeatherClient.fetchHourly(latitude, longitude, startTime)
             json.put("weather", JSONObject().apply {
-                put("source", "open-meteo archive (ERA5)")
-                put("latitude", round2(weather.latitude))
-                put("longitude", round2(weather.longitude))
-                weather.temperatureAt(startTime)?.let { put("startTemperatureC", round1(it)) }
-                weather.humidityAt(startTime)?.let { put("startHumidityPct", round1(it)) }
-                fit.endTimeUtc?.let { end ->
-                    weather.temperatureAt(end)?.let { put("endTemperatureC", round1(it)) }
-                    weather.humidityAt(end)?.let { put("endHumidityPct", round1(it)) }
-                }
-            })
-
-            if (fit.splits.isNotEmpty()) {
-                json.put("weatherSplits", JSONArray().apply {
+                put("source", "OPEN_METEO_ARCHIVE_ERA5")
+                put("samplingIntervalM", FitParser.SPLIT_INTERVAL_M.toInt())
+                put("FITContainsTemperature", fit.fitTemperatureAvailable)
+                put("samples", JSONArray().apply {
                     fit.splits.forEach { split ->
                         put(JSONObject().apply {
-                            put("distanceKm", split.distanceKm)
-                            put("time", ISO_UTC.format(split.timeUtc))
-                            weather.temperatureAt(split.timeUtc)
-                                ?.let { put("temperatureC", round1(it)) }
-                            weather.humidityAt(split.timeUtc)
-                                ?.let { put("humidityPct", round1(it)) }
+                            put("targetDistanceM", split.distanceKm * 1000)
+                            put("gpsDistanceM", round2(split.actualDistanceM))
+                            put("activityTimeUtc", ISO_UTC.format(split.timeUtc))
+                            put("activityTimeLocal", ISO_LOCAL.format(split.timeUtc))
+                            split.latitude?.let { put("latitude", it) }
+                            split.longitude?.let { put("longitude", it) }
+                            weather.temperatureAt(split.timeUtc)?.let { put("temperatureC", round1(it)) }
+                            weather.humidityAt(split.timeUtc)?.let { put("humidityPct", round1(it)) }
+                            weather.dewPointAt(split.timeUtc)?.let { put("dewPointC", round1(it)) }
+                            weather.feelsLikeAt(split.timeUtc)?.let { put("feelsLikeC", round1(it)) }
+                            weather.windSpeedAt(split.timeUtc)?.let { put("windSpeedMps", round1(it)) }
+                            weather.windDirectionAt(split.timeUtc)?.let { put("windDirectionDeg", round1(it)) }
+                            put("weatherObservedAt", ISO_UTC.format(split.timeUtc))
+                            put("weatherFetchedAt", fetchedAtUtc)
+                            put("status", "OK")
                         })
                     }
                 })
-            }
+            })
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            json.put("weatherError", e.message ?: e.toString())
+            json.put("weather", JSONObject().apply {
+                put("source", "OPEN_METEO_ARCHIVE_ERA5")
+                put("samplingIntervalM", FitParser.SPLIT_INTERVAL_M.toInt())
+                put("FITContainsTemperature", fit.fitTemperatureAvailable)
+                put("error", e.message ?: e.toString())
+                put("samples", JSONArray().apply {
+                    fit.splits.forEach { split ->
+                        put(JSONObject().apply {
+                            put("targetDistanceM", split.distanceKm * 1000)
+                            put("gpsDistanceM", round2(split.actualDistanceM))
+                            put("activityTimeUtc", ISO_UTC.format(split.timeUtc))
+                            put("activityTimeLocal", ISO_LOCAL.format(split.timeUtc))
+                            split.latitude?.let { put("latitude", it) }
+                            split.longitude?.let { put("longitude", it) }
+                            put("status", "ERROR")
+                            put("error", e.message ?: e.toString())
+                        })
+                    }
+                })
+            })
         }
+    }
+
+    /**
+     * LT(젖산 역치)·최대심박수 대비 이번 러닝 강도를 미리 계산해 붙인다. 값을 못 구하는
+     * 필드는 null로 채우기보다 아예 비운다(이 프로젝트의 기존 관례 — vo2MaxError 등).
+     */
+    private fun buildDerivedIntensityContext(
+        avgHeartRate: Int?,
+        maxHeartRateActivity: Int?,
+        maxHeartRateConfigured: Double?,
+        ltHeartRate: Double?,
+        avgPowerWatts: Int?,
+        normalizedPowerWatts: Int?,
+        ltPowerWatts: Double?,
+        avgPaceSecPerKm: Double?,
+        ltPaceSecPerKm: Double?
+    ): JSONObject = JSONObject().apply {
+        if (avgHeartRate != null && maxHeartRateConfigured != null && maxHeartRateConfigured > 0) {
+            put("avgHeartRatePctOfMax", round1(avgHeartRate / maxHeartRateConfigured * 100))
+        }
+        if (maxHeartRateActivity != null && maxHeartRateConfigured != null && maxHeartRateConfigured > 0) {
+            put("activityMaxHeartRatePctOfMax", round1(maxHeartRateActivity / maxHeartRateConfigured * 100))
+        }
+        if (avgHeartRate != null && ltHeartRate != null && ltHeartRate > 0) {
+            put("avgHeartRatePctOfLactateThreshold", round1(avgHeartRate / ltHeartRate * 100))
+        }
+        if (maxHeartRateActivity != null && ltHeartRate != null && ltHeartRate > 0) {
+            put("activityMaxHeartRatePctOfLactateThreshold", round1(maxHeartRateActivity / ltHeartRate * 100))
+        }
+        if (avgPowerWatts != null && ltPowerWatts != null && ltPowerWatts > 0) {
+            put("avgPowerPctOfLactateThresholdPower", round1(avgPowerWatts / ltPowerWatts * 100))
+        }
+        if (normalizedPowerWatts != null && ltPowerWatts != null && ltPowerWatts > 0) {
+            put(
+                "normalizedPowerPctOfLactateThresholdPower",
+                round1(normalizedPowerWatts / ltPowerWatts * 100)
+            )
+        }
+        if (avgPaceSecPerKm != null && ltPaceSecPerKm != null) {
+            put("avgPaceSlowerThanLactateThresholdSecPerKm", round1(avgPaceSecPerKm - ltPaceSecPerKm))
+        }
+        put("note", "Derived fields are convenience calculations, not additional Garmin measurements.")
     }
 
     private fun round1(value: Double): Double = Math.round(value * 10) / 10.0
@@ -536,11 +696,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        private const val SCHEMA_VERSION = "3.0"
+
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.US)
 
         /** 날씨 구간의 시각 표기. fit 타임스탬프와 같은 UTC 기준으로 맞춘다. */
         private val ISO_UTC = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
         }
+
+        /** 기기 로컬(=러너가 실제로 뛴) 시각. FitParser의 로컬 포맷과 동일하게 맞춘다. */
+        private val ISO_LOCAL = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
     }
 }

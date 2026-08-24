@@ -469,6 +469,36 @@ class GarminWebBridge(private val webView: WebView) {
         )
     }
 
+    /**
+     * 러닝 심박 존 계산에 쓰이는 최대심박수(`maxHeartRateUsed`). 프로필 화면(더보기 → 사용자
+     * 설정 → 심박수)에 보이는 값과 근접하지만, 이 엔드포인트는 zone 계산에 실제로 쓰인 값을
+     * 돌려주는 것이라 완전히 같지는 않을 수 있다(실측: 화면 191, 이 값 189 — 2bpm 차이).
+     * `lactateThresholdHeartRateUsed`가 이미 검증된 LT 심박수와 정확히 일치하는 것으로
+     * 이 엔드포인트 자체는 맞는 데이터임을 확인했다(2026-08-25).
+     *
+     * VO2max/LT와 달리 **날짜 파라미터가 없다** — 항상 현재 설정값만 조회 가능하다. 그래서
+     * `measuredDate`를 못 채운다(과거 러닝에 현재 설정을 붙이는 셈이지만, 대안이 없다).
+     */
+    suspend fun fetchMaximumHeartRate(): Double? {
+        val body = fetchViaPage("https://connect.garmin.com/gc-api/biometric-service/heartRateZones", binary = false)
+        Log.d(TAG, "heartRateZones raw response: ${body.take(600)}")
+
+        val array = try {
+            JSONArray(body)
+        } catch (e: Exception) {
+            Log.d(TAG, "heartRateZones 응답 파싱 실패: ${e.message}")
+            return null
+        }
+
+        for (i in 0 until array.length()) {
+            val entry = array.optJSONObject(i) ?: continue
+            if (!entry.optString("sport", "").equals("RUNNING", ignoreCase = true)) continue
+            val value = entry.opt("maxHeartRateUsed")
+            if (value is Number) return value.toDouble()
+        }
+        return null
+    }
+
     /** 지정한 날짜 시점의 러닝 젖산 역치 파워(FTP, W / W/kg)를 가져온다. */
     suspend fun fetchLactateThresholdPower(date: String): ThresholdPower {
         val watts = fetchStatAsOf("functionalThresholdPower", date, POWER_QUERY)
