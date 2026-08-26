@@ -309,7 +309,7 @@ class MainActivity : AppCompatActivity() {
             maxHeartRateError = e.message ?: e.toString()
         }
 
-        val savedFileNames = mutableListOf<String>()
+        val savedRuns = mutableListOf<SavedRun>()
         val failures = mutableListOf<String>()
 
         runs.forEachIndexed { index, run ->
@@ -415,12 +415,12 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 statusText.text = "$label \"${run.name}\" 날씨 조회 중..."
-                applyWeather(json, fit)
+                val weatherOutcome = applyWeather(json, fit)
 
                 val fileName =
                     "${sanitizeFileNamePart(run.name)}_${dateTimeSuffix(run.startTimeLocal)}.json"
                 DownloadSaver.saveJson(this@MainActivity, fileName, json.toString(2))
-                savedFileNames.add(fileName)
+                savedRuns.add(SavedRun(fileName, weatherOutcome))
             } catch (e: GarminAuthException) {
                 throw e
             } catch (e: CancellationException) {
@@ -430,8 +430,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        statusText.text = buildResultSummary(savedFileNames, failures)
-        if (savedFileNames.isNotEmpty()) showQuoteToast(RunningQuotes.random())
+        statusText.text = buildResultSummary(savedRuns, failures)
+        if (savedRuns.isNotEmpty()) showQuoteToast(RunningQuotes.random())
     }
 
     /**
@@ -443,7 +443,7 @@ class MainActivity : AppCompatActivity() {
      *
      * 날씨는 있으면 좋은 정보라 실패해도 러닝 저장 자체는 막지 않는다.
      */
-    private suspend fun applyWeather(json: JSONObject, fit: FitResult) {
+    private suspend fun applyWeather(json: JSONObject, fit: FitResult): WeatherOutcome {
         val latitude = fit.startLatitude
         val longitude = fit.startLongitude
         val startTime = fit.startTimeUtc
@@ -456,14 +456,15 @@ class MainActivity : AppCompatActivity() {
                 put("samples", JSONArray())
                 put("skippedReason", "위치 정보가 없는 러닝입니다 (실내/트레드밀 등)")
             })
-            return
+            return WeatherOutcome.SKIPPED_NO_GPS
         }
 
         val fetchedAtUtc = ISO_UTC.format(Date())
         try {
             val weather = WeatherClient.fetchHourly(latitude, longitude, startTime)
             json.put("weather", JSONObject().apply {
-                put("source", "OPEN_METEO_ARCHIVE_ERA5")
+                // 폴백이 동작하면 archive가 아닐 수 있으므로 실제로 쓴 소스를 그대로 적는다.
+                put("source", weather.source)
                 put("samplingIntervalM", FitParser.SPLIT_INTERVAL_M.toInt())
                 put("FITContainsTemperature", fit.fitTemperatureAvailable)
                 put("samples", JSONArray().apply {
@@ -488,11 +489,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 })
             })
+            return WeatherOutcome.ADDED
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             json.put("weather", JSONObject().apply {
-                put("source", "OPEN_METEO_ARCHIVE_ERA5")
+                // 모든 소스가 실패한 경우. 어느 소스가 왜 실패했는지는 error에 함께 담긴다.
+                put("source", "NONE")
                 put("samplingIntervalM", FitParser.SPLIT_INTERVAL_M.toInt())
                 put("FITContainsTemperature", fit.fitTemperatureAvailable)
                 put("error", e.message ?: e.toString())
@@ -511,8 +514,18 @@ class MainActivity : AppCompatActivity() {
                     }
                 })
             })
+            return WeatherOutcome.FAILED
         }
     }
+
+    /**
+     * 날씨를 붙였는지 여부. 날씨 실패는 러닝 저장 자체를 막지 않으므로 조용히 지나가기 쉬운데,
+     * 그러면 사용자는 JSON을 열어보고서야 빠진 걸 알게 된다. 결과 요약에 함께 보여준다.
+     */
+    private enum class WeatherOutcome { ADDED, FAILED, SKIPPED_NO_GPS }
+
+    /** 저장한 러닝 한 건과 그 러닝의 날씨 결과. */
+    private data class SavedRun(val fileName: String, val weather: WeatherOutcome)
 
     /**
      * LT(젖산 역치)·최대심박수 대비 이번 러닝 강도를 미리 계산해 붙인다. 값을 못 구하는
@@ -560,11 +573,43 @@ class MainActivity : AppCompatActivity() {
 
     private fun round2(value: Double): Double = Math.round(value * 100) / 100.0
 
-    private fun buildResultSummary(saved: List<String>, failures: List<String>): String {
+    /**
+     * 날씨는 러닝 한 건마다 따로 조회하지만, 같은 날 같은 장소를 몇 초 안에 연달아 부르기 때문에
+     * **실패하면 대개 그날 것 전부가 함께 실패한다.** 그래서 결과가 같으면 한 줄로 합친다
+     * (러닝 3건에 같은 문구를 3번 붙이면 지저분하기만 하다).
+     *
+     * 갈릴 때만 건수로 나눠 쓴다 — 한 건만 순간적으로 실패했거나, 그중 하나가 실내 러닝이라
+     * 위치 정보가 없는 경우.
+     */
+    private fun weatherSummaryLine(saved: List<SavedRun>): String {
+        val outcomes = saved.map { it.weather }.toSet()
+        if (outcomes.size == 1) {
+            return when (outcomes.first()) {
+                WeatherOutcome.ADDED -> "날씨 정보 추가 완료"
+                WeatherOutcome.FAILED ->
+                    "※ 날씨 정보 획득 실패 — 러닝 기록 자체는 정상 저장됐습니다. " +
+                        "다시 가져오면 날씨가 채워질 수 있습니다."
+                WeatherOutcome.SKIPPED_NO_GPS -> "날씨 없음 (위치 정보가 없는 러닝)"
+            }
+        }
+
+        val parts = mutableListOf<String>()
+        saved.count { it.weather == WeatherOutcome.ADDED }
+            .let { if (it > 0) parts.add("추가 완료 ${it}건") }
+        saved.count { it.weather == WeatherOutcome.FAILED }
+            .let { if (it > 0) parts.add("획득 실패 ${it}건") }
+        saved.count { it.weather == WeatherOutcome.SKIPPED_NO_GPS }
+            .let { if (it > 0) parts.add("위치 정보 없음 ${it}건") }
+        return "날씨: ${parts.joinToString(" / ")}"
+    }
+
+    private fun buildResultSummary(saved: List<SavedRun>, failures: List<String>): String {
         val summary = StringBuilder()
         if (saved.isNotEmpty()) {
             summary.append("저장 완료: Downloads/strongRunner/ (러닝 ${saved.size}건)\n")
-            summary.append(saved.joinToString("\n"))
+            summary.append(saved.joinToString("\n") { it.fileName })
+            summary.append("\n\n")
+            summary.append(weatherSummaryLine(saved))
         }
         if (failures.isNotEmpty()) {
             if (summary.isNotEmpty()) summary.append("\n\n")
