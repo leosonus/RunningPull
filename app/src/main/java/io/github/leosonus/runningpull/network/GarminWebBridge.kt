@@ -304,9 +304,19 @@ class GarminWebBridge(private val webView: WebView) {
 
     // ---- 엔드포인트 --------------------------------------------------------
 
-    private suspend fun fetchActivitiesPage(limit: Int, start: Int): List<GarminActivity> {
+    private suspend fun fetchActivitiesPage(
+        limit: Int,
+        start: Int,
+        startDate: String? = null,
+        endDate: String? = null
+    ): List<GarminActivity> {
+        val dateQuery = if (startDate != null && endDate != null) {
+            "&startDate=$startDate&endDate=$endDate"
+        } else {
+            ""
+        }
         val url = "https://connect.garmin.com/gc-api/activitylist-service/activities/search/activities" +
-            "?limit=$limit&start=$start"
+            "?limit=$limit&start=$start$dateQuery"
         val body = fetchViaPage(url, binary = false)
         val array = try {
             JSONArray(body)
@@ -326,25 +336,24 @@ class GarminWebBridge(private val webView: WebView) {
     }
 
     /**
-     * 지정한 날짜(yyyy-MM-dd, 기기 로컬 기준)에 시작한 활동을 찾는다. 활동 목록은 최신순으로
-     * 내려오므로, 페이지를 넘기다가 지정한 날짜보다 오래된 활동이 나오면 더 뒤질 필요가 없다.
+     * 지정한 날짜(yyyy-MM-dd, 기기 로컬 기준)에 시작한 활동을 찾는다.
+     *
+     * 예전에는 최신순 목록을 페이지네이션하며 훑었는데, 그러면 **최근 400건(20건×20페이지) 안에
+     * 든 날짜만** 조회할 수 있었다. 하루에 활동을 여러 건 기록하면(웜업/인터벌/쿨다운을 따로
+     * 남기는 식) 몇 달치가 금방 400건을 넘어서, 그보다 오래된 날짜는 목록에 닿기도 전에 루프가
+     * 끝나 **"기록된 러닝이 없습니다"로 표시됐다**(실측: 2026년 2월 이전이 전부 그랬다).
+     *
+     * `startDate`/`endDate` 쿼리로 서버에서 직접 거르도록 바꿔서, 날짜가 아무리 오래돼도
+     * 요청 한 번이면 된다. 이 API 계열에는 날짜를 받고도 무시하는 엔드포인트가 실제로 있어
+     * (`maxmet/latest/{date}`) **실측으로 동작을 확인했다.**
+     *
+     * 서버가 **로컬 날짜** 기준으로 거른다는 것도 확인했다 — 2026-08-24 06:42(로컬,
+     * = 08-23T21:42Z) 러닝이 08-24 쿼리에 정상 포함됐다. 그래도 `startTimeLocal` 재확인은
+     * 남겨둔다(서버 판정이 달라져도 엉뚱한 날짜가 섞이지 않도록).
      */
-    suspend fun fetchActivitiesForDate(date: String): List<GarminActivity> {
-        val pageSize = 20
-        val maxPages = 20
-        val matches = mutableListOf<GarminActivity>()
-
-        for (page in 0 until maxPages) {
-            val batch = fetchActivitiesPage(pageSize, page * pageSize)
-            if (batch.isEmpty()) break
-
-            matches += batch.filter { it.startTimeLocal.startsWith(date) }
-
-            val oldestDateInBatch = batch.last().startTimeLocal.take(10)
-            if (oldestDateInBatch.isNotEmpty() && oldestDateInBatch < date) break
-        }
-        return matches
-    }
+    suspend fun fetchActivitiesForDate(date: String): List<GarminActivity> =
+        fetchActivitiesPage(SINGLE_DAY_LIMIT, start = 0, startDate = date, endDate = date)
+            .filter { it.startTimeLocal.startsWith(date) }
 
     /**
      * 활동의 원본 파일(.fit)을 내려받는다. Garmin은 zip으로 감싸서 내려주는 경우가 있어
@@ -567,6 +576,9 @@ class GarminWebBridge(private val webView: WebView) {
         private const val LT_QUERY = "aggregation=daily&aggregationStrategy=LATEST&sport=RUNNING"
         private const val POWER_QUERY = "aggregation=daily&sport=Running"
         private const val VO2MAX_LOOKBACK_DAYS = 90L
+
+        /** 하루치 활동을 한 번에 받기 위한 상한. 하루에 이만큼 기록하는 일은 없다. */
+        private const val SINGLE_DAY_LIMIT = 100
         private val RETRY_DELAYS_MS = longArrayOf(1_000L, 3_000L)
 
         private fun isSignInUrl(url: String): Boolean =
