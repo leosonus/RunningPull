@@ -13,3 +13,9 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# 릴리즈 서명 키와 비밀번호. 절대 커밋하지 말 것.
+# 이 키를 잃어버리면 이미 설치된 앱 위에 업데이트를 못 한다(서명 불일치) — 따로 백업해둘 것.
+*.jks
+*.keystore
+keystore.properties

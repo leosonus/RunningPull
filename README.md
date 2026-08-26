@@ -51,6 +51,11 @@ Garmin은 공개 API가 없어서 웹 로그인 흐름을 그대로 쓴다.
   %로 미리 계산해 붙인다. AI가 이전 대화 없이 JSON만 보고도 강도를 바로 판단할 수 있게
   하려는 것.
 
+## 설치
+
+빌드 없이 바로 설치하려면 [`apk/`](apk/) 폴더의 APK를 받으면 된다 (설치 방법과 주의사항은
+[apk/README.md](apk/README.md) 참고).
+
 ## 빌드
 
 ```
@@ -58,6 +63,10 @@ Garmin은 공개 API가 없어서 웹 로그인 흐름을 그대로 쓴다.
 ```
 
 minSdk 26 / targetSdk 37. 별도 설정이나 API 키는 필요 없다.
+
+릴리즈 빌드(`assembleRelease`)는 서명 키가 있어야 설치 가능한 APK가 나온다. 키
+(`runningpull-release.jks`)와 비밀번호(`keystore.properties`)는 저장소에 올리지 않으므로,
+키가 없는 환경에서는 서명 없이 빌드된다(디버그 빌드는 영향 없음).
 
 ## 참고
 
