@@ -53,8 +53,18 @@ Garmin은 공개 API가 없어서 웹 로그인 흐름을 그대로 쓴다.
 
 ## 설치
 
-빌드 없이 바로 설치하려면 [`apk/`](apk/) 폴더의 APK를 받으면 된다 (설치 방법과 주의사항은
-[apk/README.md](apk/README.md) 참고).
+빌드 없이 바로 설치하려면 **[Releases](https://github.com/leosonus/RunningPull/releases/latest)**
+에서 APK를 받으면 된다.
+
+1. 받은 APK를 안드로이드 기기에서 탭하면 **"이 출처의 앱 설치"** 를 허용하라는 안내가 뜬다 —
+   Play 스토어를 거치지 않은 앱이라 정상이다. 허용하고 설치한다
+2. 앱을 열어 **Garmin Connect 계정으로 로그인**한다
+   (앱이 비밀번호를 직접 다루지 않고 Garmin 공식 로그인 페이지를 띄운다)
+3. 받아온 러닝 JSON은 기기의 `Downloads/strongRunner/` 에 저장된다
+
+Android 8.0(API 26) 이상. 소스에서 직접 빌드한 디버그 버전이 이미 깔려 있으면 서명이 달라
+설치가 거부되므로, 기존 앱을 먼저 삭제해야 한다(**삭제하면 로그인 세션도 지워져 다시
+로그인해야 한다**).
 
 ## 빌드
 
@@ -67,6 +77,8 @@ minSdk 26 / targetSdk 37. 별도 설정이나 API 키는 필요 없다.
 릴리즈 빌드(`assembleRelease`)는 서명 키가 있어야 설치 가능한 APK가 나온다. 키
 (`runningpull-release.jks`)와 비밀번호(`keystore.properties`)는 저장소에 올리지 않으므로,
 키가 없는 환경에서는 서명 없이 빌드된다(디버그 빌드는 영향 없음).
+
+배포는 GitHub Releases로 한다. 절차는 [RELEASING.md](RELEASING.md) 참고.
 
 ## 참고
 
