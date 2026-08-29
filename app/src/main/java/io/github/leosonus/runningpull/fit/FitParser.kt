@@ -1,5 +1,7 @@
 package io.github.leosonus.runningpull.fit
 
+import com.garmin.fit.ActivityMesg
+import com.garmin.fit.ActivityMesgListener
 import com.garmin.fit.Decode
 import com.garmin.fit.LapMesg
 import com.garmin.fit.LapMesgListener
@@ -8,6 +10,12 @@ import com.garmin.fit.RecordMesg
 import com.garmin.fit.RecordMesgListener
 import com.garmin.fit.SessionMesg
 import com.garmin.fit.SessionMesgListener
+import com.garmin.fit.TimeInZoneMesg
+import com.garmin.fit.TimeInZoneMesgListener
+import com.garmin.fit.UserProfileMesg
+import com.garmin.fit.UserProfileMesgListener
+import com.garmin.fit.ZonesTargetMesg
+import com.garmin.fit.ZonesTargetMesgListener
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -15,6 +23,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class FitParseException(message: String) : Exception(message)
@@ -47,6 +56,25 @@ data class RunningRecord(
 )
 
 /**
+ * 그 러닝을 기록할 때 시계에 설정돼 있던 값들. `zones_target`/`time_in_zone`/`user_profile`
+ * 메시지에서 온다.
+ *
+ * **이 값들이 중요한 이유**: 같은 지표를 Garmin REST에서도 받을 수 있지만, 최대심박수
+ * (`biometric-service/heartRateZones`)는 날짜 파라미터가 아예 없어 **언제 물어봐도 현재값**이
+ * 온다. 5개월 전 러닝에 오늘 설정이 붙는다는 뜻이다. fit 파일은 그 시점에 기록된 파일이라
+ * 그때 값을 그대로 갖고 있다 — 실측으로 확인했다(skills/fit_sdk_update.md 2-3절).
+ */
+data class FitAthleteSettings(
+    val maxHeartRateBpm: Int?,
+    val thresholdHeartRateBpm: Int?,
+    val functionalThresholdPowerW: Int?,
+    val restingHeartRateBpm: Int?,
+    val weightKg: Double?,
+    /** FTP ÷ 체중. 둘 다 fit에 있을 때만 계산한다. */
+    val powerToWeight: Double?
+)
+
+/**
  * fit 파싱 결과. JSON은 FIT 파일만으로 채울 수 있는 부분(스키마 v3의 대부분 블록 + laps[] +
  * records[])까지 다 채워서 넘긴다. athleteContext/physiology/derivedIntensityContext/weather처럼
  * Garmin API·날씨 API 조회가 필요한 블록은 MainActivity가 이 JSON에 이어서 채운다.
@@ -66,7 +94,11 @@ data class FitResult(
     val maxHeartRate: Int?,
     val avgPaceSecPerKm: Double?,
     val avgPowerWatts: Int?,
-    val normalizedPowerWatts: Int?
+    val normalizedPowerWatts: Int?,
+    /** 그 러닝 당시 시계 설정값. 해당 메시지가 없는 fit이면 null. */
+    val athleteSettings: FitAthleteSettings?,
+    /** 기기가 있던 UTC 오프셋(초). activity 메시지가 없으면 null이고, 그때는 폰 타임존을 쓴다. */
+    val localOffsetSec: Int?
 )
 
 /**
@@ -92,6 +124,12 @@ object FitParser {
     fun parse(fitBytes: ByteArray): FitResult {
         val sessions = mutableListOf<SessionMesg>()
         val laps = mutableListOf<LapMesg>()
+        // 개수가 1~80개뿐이라 그대로 담아도 부담이 없다. record처럼 수천 개인 메시지만
+        // 훑으면서 버린다(전량 보관 시 33분 러닝에 10MB — fit_sdk_update.md Step 2).
+        val timeInZones = mutableListOf<TimeInZoneMesg>()
+        var zonesTarget: ZonesTargetMesg? = null
+        var userProfile: UserProfileMesg? = null
+        var activityMesg: ActivityMesg? = null
         val records = mutableListOf<RunningRecord>()
         val splits = mutableListOf<SplitPoint>()
 
@@ -107,6 +145,10 @@ object FitParser {
         val broadcaster = MesgBroadcaster(Decode())
         broadcaster.addListener(SessionMesgListener { sessions.add(it) })
         broadcaster.addListener(LapMesgListener { laps.add(it) })
+        broadcaster.addListener(ZonesTargetMesgListener { zonesTarget = it })
+        broadcaster.addListener(TimeInZoneMesgListener { timeInZones.add(it) })
+        broadcaster.addListener(UserProfileMesgListener { userProfile = it })
+        broadcaster.addListener(ActivityMesgListener { activityMesg = it })
         broadcaster.addListener(RecordMesgListener { record ->
             val time = record.timestamp?.date
             if (time != null) lastRecordTime = time
@@ -161,15 +203,27 @@ object FitParser {
         val session = sessions.firstOrNull()
             ?: throw FitParseException("fit 파일에 세션 정보가 없습니다")
 
+        // activity 메시지의 local_timestamp와 timestamp 차이가 곧 기기의 UTC 오프셋이다.
+        // 예전에는 폰의 현재 타임존으로 로컬 시각을 찍어서, 해외에서 뛴 러닝이나 폰 타임존을
+        // 바꾼 뒤 받은 과거 러닝의 startTimeLocal이 틀리게 나갔다.
+        // (activity.timestamp를 종료 시각으로 쓰면 안 된다 — 실측해 보니 시작 시각이 들어 있다.)
+        val localOffsetSec = activityMesg?.let { activity ->
+            val utc = activity.timestamp?.timestamp
+            val local = activity.localTimestamp
+            if (utc != null && local != null) (local - utc).toInt() else null
+        }
+        val fmt = LocalTimeFormatter(localOffsetSec)
+        val athleteSettings = buildAthleteSettings(zonesTarget, timeInZones, userProfile)
+
         val avgSpeed = session.enhancedAvgSpeed ?: session.avgSpeed
         val maxSpeed = session.enhancedMaxSpeed ?: session.maxSpeed
         val avgPaceSecPerKm = avgSpeed?.let { if (it > 0f) 1000.0 / it else null }
         val maxInstantPaceSecPerKm = maxSpeed?.let { if (it > 0f) 1000.0 / it else null }
 
         val json = JSONObject()
-        json.put("activity", buildActivityBlock(session))
+        json.put("activity", buildActivityBlock(session, fmt))
         json.put("summary", buildSummaryBlock(session, avgPaceSecPerKm, maxInstantPaceSecPerKm))
-        json.put("timing", buildTimingBlock(session, records))
+        json.put("timing", buildTimingBlock(session, records, fmt))
         json.put("distance", buildDistanceBlock(session))
         json.put("paceSpeed", buildPaceSpeedBlock(avgSpeed, maxSpeed, avgPaceSecPerKm, maxInstantPaceSecPerKm))
         json.put("heartRate", JSONObject().apply {
@@ -205,11 +259,11 @@ object FitParser {
             var cumulativeDistanceM = 0.0
             laps.forEachIndexed { index, lap ->
                 val lapDistance = (lap.totalDistance ?: 0f).toDouble()
-                put(lap.toJson(index + 1, cumulativeDistanceM, cumulativeDistanceM + lapDistance))
+                put(lap.toJson(index + 1, cumulativeDistanceM, cumulativeDistanceM + lapDistance, fmt))
                 cumulativeDistanceM += lapDistance
             }
         })
-        json.put("records", JSONArray().apply { records.forEach { put(it.toJson()) } })
+        json.put("records", JSONArray().apply { records.forEach { put(it.toJson(fmt)) } })
 
         val startTime = session.startTime?.date
         return FitResult(
@@ -227,19 +281,21 @@ object FitParser {
             maxHeartRate = session.maxHeartRate?.toInt(),
             avgPaceSecPerKm = avgPaceSecPerKm,
             avgPowerWatts = session.avgPower,
-            normalizedPowerWatts = session.normalizedPower
+            normalizedPowerWatts = session.normalizedPower,
+            athleteSettings = athleteSettings,
+            localOffsetSec = localOffsetSec
         )
     }
 
-    private fun buildActivityBlock(session: SessionMesg): JSONObject = JSONObject().apply {
+    private fun buildActivityBlock(session: SessionMesg, fmt: LocalTimeFormatter): JSONObject = JSONObject().apply {
         putIfNotNull("sport", session.sport?.name)
         putIfNotNull("startTimeUtc", session.startTime?.date?.toIso())
-        putIfNotNull("startTimeLocal", session.startTime?.date?.toLocalIso())
+        putIfNotNull("startTimeLocal", session.startTime?.date?.toLocalIso(fmt))
         val endTime = session.startTime?.date?.let { s ->
             session.totalElapsedTime?.let { Date(s.time + (it * 1000).toLong()) }
         }
         putIfNotNull("endTimeUtc", endTime?.toIso())
-        putIfNotNull("endTimeLocal", endTime?.toLocalIso())
+        putIfNotNull("endTimeLocal", endTime?.toLocalIso(fmt))
     }
 
     private fun buildSummaryBlock(
@@ -264,12 +320,12 @@ object FitParser {
         }
         putIfNotNull("avgHeartRate", session.avgHeartRate?.toInt())
         putIfNotNull("maxHeartRate", session.maxHeartRate?.toInt())
-        session.avgRunningCadence?.let {
-            put("avgRunningCadenceFitRpm", it.toDouble())
+        cadenceRpm(session.avgRunningCadence, session.avgFractionalCadence)?.let {
+            put("avgRunningCadenceFitRpm", it)
             put("avgRunningCadenceSpm", round1(it * 2.0))
         }
-        session.maxRunningCadence?.let {
-            put("maxRunningCadenceFitRpm", it.toDouble())
+        cadenceRpm(session.maxRunningCadence, session.maxFractionalCadence)?.let {
+            put("maxRunningCadenceFitRpm", it)
             put("maxRunningCadenceSpm", round1(it * 2.0))
         }
         putIfNotNull("totalStrides", session.totalStrides)
@@ -294,15 +350,19 @@ object FitParser {
 
     /** records[]에 남은 항목들의 타임스탬프 간격 중앙값(초). 다운샘플링 결과라 보통
      * RECORD_SAMPLE_INTERVAL_SEC(10)에 가깝다. */
-    private fun buildTimingBlock(session: SessionMesg, records: List<RunningRecord>): JSONObject =
+    private fun buildTimingBlock(
+        session: SessionMesg,
+        records: List<RunningRecord>,
+        fmt: LocalTimeFormatter
+    ): JSONObject =
         JSONObject().apply {
             putIfNotNull("startTimeUtc", session.startTime?.date?.toIso())
-            putIfNotNull("startTimeLocal", session.startTime?.date?.toLocalIso())
+            putIfNotNull("startTimeLocal", session.startTime?.date?.toLocalIso(fmt))
             val endTime = session.startTime?.date?.let { s ->
                 session.totalElapsedTime?.let { Date(s.time + (it * 1000).toLong()) }
             }
             putIfNotNull("endTimeUtc", endTime?.toIso())
-            putIfNotNull("endTimeLocal", endTime?.toLocalIso())
+            putIfNotNull("endTimeLocal", endTime?.toLocalIso(fmt))
             putIfNotNull("elapsedSec", session.totalElapsedTime.rounded(3))
             putIfNotNull("timerSec", session.totalTimerTime.rounded(3))
             if (session.totalElapsedTime != null && session.totalTimerTime != null) {
@@ -342,14 +402,19 @@ object FitParser {
     }
 
     private fun buildCadenceBlock(session: SessionMesg): JSONObject = JSONObject().apply {
-        putIfNotNull("avgFitRpm", session.avgRunningCadence?.toDouble())
-        session.avgRunningCadence?.let { put("avgSpm", round1(it * 2.0)) }
-        putIfNotNull("maxFitRpm", session.maxRunningCadence?.toDouble())
-        session.maxRunningCadence?.let { put("maxSpm", round1(it * 2.0)) }
+        cadenceRpm(session.avgRunningCadence, session.avgFractionalCadence)?.let {
+            put("avgFitRpm", it)
+            put("avgSpm", round1(it * 2.0))
+        }
+        cadenceRpm(session.maxRunningCadence, session.maxFractionalCadence)?.let {
+            put("maxFitRpm", it)
+            put("maxSpm", round1(it * 2.0))
+        }
         put(
             "note",
-            "Garmin FIT running cadence is stored as cycles/rpm-style cadence; " +
-                "avgSpm/maxSpm are doubled for full-step cadence."
+            "Garmin FIT running cadence is stored as cycles/rpm-style cadence " +
+                "(profile units: strides/min); avgSpm/maxSpm are doubled for full-step " +
+                "cadence. Values include the fractional_cadence component."
         )
     }
 
@@ -415,10 +480,15 @@ object FitParser {
         }
     }
 
-    private fun LapMesg.toJson(lapNumber: Int, startDistanceM: Double, endDistanceM: Double): JSONObject = JSONObject().apply {
+    private fun LapMesg.toJson(
+        lapNumber: Int,
+        startDistanceM: Double,
+        endDistanceM: Double,
+        fmt: LocalTimeFormatter
+    ): JSONObject = JSONObject().apply {
         put("lap", lapNumber)
         putIfNotNull("startTimeUtc", startTime?.date?.toIso())
-        putIfNotNull("startTimeLocal", startTime?.date?.toLocalIso())
+        putIfNotNull("startTimeLocal", startTime?.date?.toLocalIso(fmt))
         put("startDistanceM", round1(startDistanceM))
         put("endDistanceM", round1(endDistanceM))
         putIfNotNull("distanceM", totalDistance.rounded(1))
@@ -438,10 +508,14 @@ object FitParser {
             putIfNotNull("maxBpm", maxHeartRate?.toInt())
         })
         put("cadence", JSONObject().apply {
-            putIfNotNull("avgFitRpm", avgRunningCadence?.toDouble())
-            avgRunningCadence?.let { put("avgSpm", round1(it * 2.0)) }
-            putIfNotNull("maxFitRpm", maxRunningCadence?.toDouble())
-            maxRunningCadence?.let { put("maxSpm", round1(it * 2.0)) }
+            cadenceRpm(avgRunningCadence, avgFractionalCadence)?.let {
+                put("avgFitRpm", it)
+                put("avgSpm", round1(it * 2.0))
+            }
+            cadenceRpm(maxRunningCadence, maxFractionalCadence)?.let {
+                put("maxFitRpm", it)
+                put("maxSpm", round1(it * 2.0))
+            }
         })
         put("power", JSONObject().apply {
             putIfNotNull("avgW", avgPower)
@@ -475,7 +549,7 @@ object FitParser {
             elevationM = (enhancedAltitude ?: altitude).rounded(1),
             speedMps = speed,
             heartRateBpm = heartRate?.toInt(),
-            cadenceFitRpm = cadence?.toDouble(),
+            cadenceFitRpm = cadenceRpm(cadence, fractionalCadence),
             powerW = power,
             groundContactTimeMs = stanceTime.rounded(1),
             stepLengthMm = stepLength.rounded(1),
@@ -484,9 +558,9 @@ object FitParser {
         )
     }
 
-    private fun RunningRecord.toJson(): JSONObject = JSONObject().apply {
+    private fun RunningRecord.toJson(fmt: LocalTimeFormatter): JSONObject = JSONObject().apply {
         put("timestampUtc", timestampUtc.toIso())
-        put("timestampLocal", timestampUtc.toLocalIso())
+        put("timestampLocal", timestampUtc.toLocalIso(fmt))
         putIfNotNull("distanceM", distanceM)
         putIfNotNull("latitude", latitude)
         putIfNotNull("longitude", longitude)
@@ -509,7 +583,7 @@ object FitParser {
 
     private fun Date.toIso(): String = ISO_UTC_FORMAT.format(this)
 
-    private fun Date.toLocalIso(): String = ISO_LOCAL_FORMAT.format(this)
+    private fun Date.toLocalIso(fmt: LocalTimeFormatter): String = fmt.format(this)
 
     private fun Double.toPaceString(): String {
         val min = (this / 60).toInt()
@@ -540,6 +614,68 @@ object FitParser {
         timeZone = TimeZone.getTimeZone("UTC")
     }
 
-    /** 기기 로컬(=러너가 실제로 뛴) 시각. 기기 타임존 오프셋 없이 시스템 기본 타임존으로 표시한다. */
-    private val ISO_LOCAL_FORMAT = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US)
+    /**
+     * 기기 로컬(=러너가 실제로 뛴) 시각 포맷터.
+     *
+     * fit의 activity 메시지가 알려주는 **그 러닝 당시 기기의 UTC 오프셋**을 쓴다. 오프셋을
+     * 못 구하면 예전처럼 시스템 기본 타임존으로 떨어진다(없느니 폰 기준이라도 낫다).
+     */
+    private class LocalTimeFormatter(offsetSec: Int?) {
+        private val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).apply {
+            if (offsetSec != null) timeZone = TimeZone.getTimeZone(gmtId(offsetSec))
+        }
+
+        fun format(date: Date): String = format.format(date)
+
+        private fun gmtId(offsetSec: Int): String {
+            val sign = if (offsetSec < 0) "-" else "+"
+            val absSec = abs(offsetSec)
+            return String.format(Locale.US, "GMT%s%02d:%02d", sign, absSec / 3600, (absSec % 3600) / 60)
+        }
+    }
+
+    /**
+     * 그 러닝 당시 시계 설정값을 모은다. `zones_target`이 1순위이고, 없으면 `time_in_zone`이
+     * 같은 값을 한 번 더 갖고 있어 그쪽에서 줍는다(실측한 두 파일 모두 값이 일치했다).
+     * 체중은 `user_profile`에서 오며, FTP와 함께 있을 때만 W/kg을 계산한다.
+     */
+    private fun buildAthleteSettings(
+        zonesTarget: ZonesTargetMesg?,
+        timeInZones: List<TimeInZoneMesg>,
+        userProfile: UserProfileMesg?
+    ): FitAthleteSettings? {
+        val zoneInfo = timeInZones.firstOrNull {
+            it.maxHeartRate != null || it.functionalThresholdPower != null
+        }
+        val maxHr = (zonesTarget?.maxHeartRate ?: zoneInfo?.maxHeartRate)?.toInt()
+        val thresholdHr = (zonesTarget?.thresholdHeartRate ?: zoneInfo?.thresholdHeartRate)?.toInt()
+        val ftp = zonesTarget?.functionalThresholdPower ?: zoneInfo?.functionalThresholdPower
+        val restingHr = zoneInfo?.restingHeartRate?.toInt()
+        val weightKg = userProfile?.weight?.let { round1(it.toDouble()) }
+        if (maxHr == null && thresholdHr == null && ftp == null && restingHr == null && weightKg == null) {
+            return null
+        }
+        return FitAthleteSettings(
+            maxHeartRateBpm = maxHr,
+            thresholdHeartRateBpm = thresholdHr,
+            functionalThresholdPowerW = ftp,
+            restingHeartRateBpm = restingHr,
+            weightKg = weightKg,
+            powerToWeight = if (ftp != null && weightKg != null && weightKg > 0) {
+                round2(ftp / weightKg)
+            } else {
+                null
+            }
+        )
+    }
+
+    /**
+     * FIT은 케이던스를 정수부(rpm)와 소수부(scale 128)로 나눠 기록한다. 정수부만 쓰면 최대
+     * 1 rpm(=2 spm)이 깎인다 — 실측한 러닝에서 84 rpm(168.0 spm)으로 나가던 것이 실제로는
+     * 84.72 rpm(169.4 spm)이었다.
+     */
+    private fun cadenceRpm(whole: Short?, fractional: Float?): Double? {
+        if (whole == null) return null
+        return round3(whole.toDouble() + (fractional?.toDouble() ?: 0.0))
+    }
 }

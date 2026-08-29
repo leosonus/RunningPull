@@ -320,6 +320,19 @@ class MainActivity : AppCompatActivity() {
 
                 statusText.text = "$label \"${run.name}\" JSON으로 변환 중..."
                 val fit = FitParser.parse(fitBytes)
+
+                // 최대심박수·LT 심박·LT 파워는 fit 파일이 "그 러닝 당시 설정값"을 갖고 있다.
+                // REST는 최대심박수에 날짜 파라미터가 아예 없어 항상 현재값을 주므로, fit에
+                // 값이 있으면 fit을 쓴다. 실측 근거는 skills/fit_sdk_update.md 2-3절.
+                // REST 호출은 당분간 그대로 두고 두 값을 나란히 남긴다 — 어긋나는 경우를
+                // 확인한 뒤에 호출을 걷어내려는 것.
+                val fitSettings = fit.athleteSettings
+                val effectiveMaxHeartRate = fitSettings?.maxHeartRateBpm?.toDouble() ?: maxHeartRateBpm
+                val effectiveLtHeartRate = fitSettings?.thresholdHeartRateBpm?.toDouble() ?: ltHeartRate
+                val effectiveLtPowerWatts =
+                    fitSettings?.functionalThresholdPowerW?.toDouble() ?: ltPowerWatts
+                val effectiveLtPowerPerKg = fitSettings?.powerToWeight ?: ltPowerPerKg
+
                 val json = fit.json.apply {
                     put("schemaVersion", SCHEMA_VERSION)
                     put("schemaPurpose", "SELF_CONTAINED_RUNNING_ANALYSIS_FOR_AI")
@@ -327,12 +340,16 @@ class MainActivity : AppCompatActivity() {
                     getJSONObject("source").apply {
                         put("activityFitFile", "${run.id}_ACTIVITY.fit")
                         put("externalEnrichment", JSONArray(listOf("GARMIN_CONNECT_OR_PROFILE", "WEATHER_API")))
+                        fit.localOffsetSec?.let { put("deviceUtcOffsetSec", it) }
                         put(
                             "provenanceNote",
                             "Activity/lap/record metrics come from the activity FIT unless " +
-                                "otherwise stated. VO2max and lactate-threshold metrics are " +
-                                "contextual metrics stored with the activity so an AI can " +
-                                "analyze the run without relying on conversation memory."
+                                "otherwise stated. Max HR and lactate-threshold HR/power come " +
+                                "from the FIT itself when present, so they reflect the settings " +
+                                "at the time of the run; each value carries its own source " +
+                                "field. VO2max and threshold pace have no FIT field and always " +
+                                "come from Garmin. Local timestamps use the device's own UTC " +
+                                "offset from the FIT activity message, not the phone's."
                         )
                     }
                     getJSONObject("activity").apply {
@@ -343,20 +360,43 @@ class MainActivity : AppCompatActivity() {
 
                     put("athleteContext", JSONObject().apply {
                         put("snapshotDate", targetDate)
-                        maxHeartRateBpm?.let {
+                        effectiveMaxHeartRate?.let {
                             put("maximumHeartRate", JSONObject().apply {
                                 put("bpm", it)
-                                put("source", "GARMIN_HEART_RATE_ZONES_RUNNING")
-                                put(
-                                    "note",
-                                    "biometric-service/heartRateZones의 RUNNING 항목 " +
-                                        "maxHeartRateUsed. 날짜 파라미터가 없어 조회 시점의 " +
-                                        "현재 설정값이며(과거 러닝이어도 동일), 프로필 화면에 " +
-                                        "보이는 값과 소폭 다를 수 있다."
-                                )
+                                if (fitSettings?.maxHeartRateBpm != null) {
+                                    put("source", SOURCE_FIT)
+                                    put(
+                                        "note",
+                                        "fit의 zones_target 메시지. 이 러닝을 기록할 때 시계에 " +
+                                            "설정돼 있던 값이라, 과거 러닝에도 그 시점 값이 붙는다."
+                                    )
+                                    // 대조용. 다르면 그 사이에 설정이 바뀐 것이다.
+                                    maxHeartRateBpm?.let { rest -> put("garminRestBpm", rest) }
+                                } else {
+                                    put("source", "GARMIN_HEART_RATE_ZONES_RUNNING")
+                                    put(
+                                        "note",
+                                        "fit에 zones_target이 없어 Garmin에서 받았다. " +
+                                            "biometric-service/heartRateZones의 RUNNING 항목 " +
+                                            "maxHeartRateUsed로, 날짜 파라미터가 없어 조회 시점의 " +
+                                            "현재 설정값이다(과거 러닝이어도 동일)."
+                                    )
+                                }
                             })
                         }
                         maxHeartRateError?.let { put("maximumHeartRateError", it) }
+                        fitSettings?.restingHeartRateBpm?.let {
+                            put("restingHeartRate", JSONObject().apply {
+                                put("bpm", it)
+                                put("source", SOURCE_FIT)
+                            })
+                        }
+                        fitSettings?.weightKg?.let {
+                            put("bodyWeightKg", JSONObject().apply {
+                                put("kg", it)
+                                put("source", SOURCE_FIT)
+                            })
+                        }
                         vo2Max?.let {
                             put("vo2Max", JSONObject().apply {
                                 put("value", it)
@@ -365,15 +405,42 @@ class MainActivity : AppCompatActivity() {
                             })
                         }
                         vo2MaxError?.let { put("vo2MaxError", it) }
-                        if (ltHeartRate != null || ltPace != null || ltPowerWatts != null) {
+                        if (effectiveLtHeartRate != null || ltPace != null || effectiveLtPowerWatts != null) {
                             put("lactateThreshold", JSONObject().apply {
-                                ltHeartRate?.let { put("heartRateBpm", it) }
-                                ltPace?.let { put("pacePerKm", it) }
+                                effectiveLtHeartRate?.let { put("heartRateBpm", it) }
+                                put(
+                                    "heartRateSource",
+                                    if (fitSettings?.thresholdHeartRateBpm != null) SOURCE_FIT
+                                    else "GARMIN_CONNECT_OR_PROFILE"
+                                )
+                                // 페이스는 fit 프로파일에 대응 필드(threshold_speed)가 아예
+                                // 없어서 Garmin에서만 받을 수 있다.
+                                ltPace?.let {
+                                    put("pacePerKm", it)
+                                    put("paceSource", "GARMIN_CONNECT_OR_PROFILE")
+                                }
                                 ltPaceSecPerKm?.let { put("paceSecPerKm", round1(it)) }
-                                ltPowerWatts?.let { put("powerWatts", it) }
-                                ltPowerPerKg?.let { put("powerPerKg", it) }
+                                effectiveLtPowerWatts?.let { put("powerWatts", it) }
+                                effectiveLtPowerPerKg?.let { put("powerPerKg", it) }
+                                if (fitSettings?.functionalThresholdPowerW != null) {
+                                    put("powerSource", SOURCE_FIT)
+                                    put(
+                                        "powerNote",
+                                        "fit zones_target의 functional_threshold_power. " +
+                                            "powerPerKg는 fit user_profile의 체중으로 나눈 값이다."
+                                    )
+                                } else if (effectiveLtPowerWatts != null) {
+                                    put("powerSource", "GARMIN_CONNECT_OR_PROFILE")
+                                }
                                 (ltMeasuredDate ?: ltPowerMeasuredDate)?.let { put("measuredDate", it) }
-                                put("source", "GARMIN_CONNECT_OR_PROFILE")
+                                // 대조용 Garmin 원본값. fit과 다르면 그 사이에 갱신이 있었다는 뜻.
+                                if (fitSettings != null) {
+                                    put("garminRest", JSONObject().apply {
+                                        ltHeartRate?.let { put("heartRateBpm", it) }
+                                        ltPowerWatts?.let { put("powerWatts", it) }
+                                        ltPowerPerKg?.let { put("powerPerKg", it) }
+                                    })
+                                }
                             })
                         }
                         ltError?.let { put("lactateThresholdError", it) }
@@ -381,21 +448,23 @@ class MainActivity : AppCompatActivity() {
                     })
 
                     getJSONObject("heartRate").apply {
-                        ltHeartRate?.let { put("lactateThresholdHeartRateBpm", it) }
+                        effectiveLtHeartRate?.let { put("lactateThresholdHeartRateBpm", it) }
                     }
                     getJSONObject("power").apply {
-                        ltPowerWatts?.let { put("lactateThresholdPowerW", it) }
+                        effectiveLtPowerWatts?.let { put("lactateThresholdPowerW", it) }
                     }
 
                     put("physiology", JSONObject().apply {
-                        put("source", "GARMIN_PROFILE_OR_API_NOT_ACTIVITY_FIT")
+                        // 값마다 출처가 갈리게 됐다. 블록 단위 source로는 더 이상 정확히
+                        // 말할 수 없어서, 값별 출처는 athleteContext 쪽을 보게 한다.
+                        put("source", "SEE_ATHLETE_CONTEXT_PER_VALUE_SOURCE")
                         vo2Max?.let { put("vo2Max", it) }
                         vo2MaxMeasuredDate?.let { put("vo2MaxMeasuredDate", it) }
-                        ltHeartRate?.let { put("lactateThresholdHeartRateBpm", it) }
+                        effectiveLtHeartRate?.let { put("lactateThresholdHeartRateBpm", it) }
                         ltPace?.let { put("lactateThresholdPacePerKm", it) }
                         ltMeasuredDate?.let { put("lactateThresholdMeasuredDate", it) }
-                        ltPowerWatts?.let { put("lactateThresholdPowerW", it) }
-                        ltPowerPerKg?.let { put("lactateThresholdPowerPerKg", it) }
+                        effectiveLtPowerWatts?.let { put("lactateThresholdPowerW", it) }
+                        effectiveLtPowerPerKg?.let { put("lactateThresholdPowerPerKg", it) }
                     })
 
                     put(
@@ -403,11 +472,11 @@ class MainActivity : AppCompatActivity() {
                         buildDerivedIntensityContext(
                             avgHeartRate = fit.avgHeartRate,
                             maxHeartRateActivity = fit.maxHeartRate,
-                            maxHeartRateConfigured = maxHeartRateBpm,
-                            ltHeartRate = ltHeartRate,
+                            maxHeartRateConfigured = effectiveMaxHeartRate,
+                            ltHeartRate = effectiveLtHeartRate,
                             avgPowerWatts = fit.avgPowerWatts,
                             normalizedPowerWatts = fit.normalizedPowerWatts,
-                            ltPowerWatts = ltPowerWatts,
+                            ltPowerWatts = effectiveLtPowerWatts,
                             avgPaceSecPerKm = fit.avgPaceSecPerKm,
                             ltPaceSecPerKm = ltPaceSecPerKm
                         )
@@ -742,6 +811,12 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val SCHEMA_VERSION = "3.0"
+
+        /**
+         * fit 파일 자체가 출처라는 표시. Garmin REST에서 받은 값과 구분하려고 둔다
+         * (REST의 최대심박수는 날짜 파라미터가 없어 항상 현재값이다).
+         */
+        private const val SOURCE_FIT = "FIT_ACTIVITY_FILE"
 
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.US)
 
