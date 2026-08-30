@@ -23,3 +23,7 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+
+# 개인 작업 노트(계획·진행 기록·조사 메모). 저장소에 올리지 않는다.
+# 앱 동작에 필요한 설명은 README.md에 있다.
+/skills
