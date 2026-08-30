@@ -37,12 +37,12 @@ Garmin은 공개 API가 없어서 웹 로그인 흐름을 그대로 쓴다.
 - **API 호출** — OkHttp 같은 외부 클라이언트로 부르면 Cloudflare가 봇으로 보고 403으로 막는다.
   그래서 로그인 세션을 쥔 **숨은 WebView 안에서 `fetch()`를 실행**하고 결과를
   `JavascriptInterface`로 받아온다. 쿠키·csrf·TLS 지문이 전부 진짜 브라우저 것이라 막히지 않는다.
-- **FIT 파싱** — fit은 바이너리 포맷이라 직접 뜯지 않고 **Garmin 공식 FIT SDK**
-  ([`com.garmin:fit:21.205.0`](https://central.sonatype.com/artifact/com.garmin/fit),
-  [FIT SDK 배포처](https://developer.garmin.com/fit/get-the-sdk/))로 디코딩한다.
-  필드 번호·스케일·단위가 SDK의 FIT Profile에 정의돼 있어 값을 추측할 필요가 없다.
-  세션/랩 요약뿐 아니라 record(원래 1초 간격)를 10초로 다운샘플링해 `records[]`에 담는다. 심박 드리프트, 오르막 영향, 케이던스 변화, 질주 구간처럼
-  요약만으로는 안 보이는 것까지 분석할 수 있게 하면서도 파일이 너무 커지지 않게 하려는 것.
+- **FIT 파싱** — fit은 바이너리 포맷이라 직접 뜯지 않고 **Garmin 공식 FIT SDK**로
+  디코딩한다 (자세한 내용과 링크는 아래
+  [FIT SDK로 fit 파일을 읽는 방법](#fit-sdk로-fit-파일을-읽는-방법)).
+  세션/랩 요약뿐 아니라 record(원래 1초 간격)를 10초로 다운샘플링해 `records[]`에 담는다.
+  심박 드리프트, 오르막 영향, 케이던스 변화, 질주 구간처럼 요약만으로는 안 보이는 것까지
+  분석할 수 있게 하면서도 파일이 너무 커지지 않게 하려는 것.
   결승 시점 record는 간격에 안 맞아도 항상 포함한다.
 - **부가 지표** — 최대심박수·젖산 역치(심박·파워)는 **fit 파일 안에 그 러닝 당시 설정값이
   들어 있다**(`zones_target` 메시지). 그래서 fit을 1순위로 쓴다. 예전에는 이것들을 Garmin
@@ -59,6 +59,78 @@ Garmin은 공개 API가 없어서 웹 로그인 흐름을 그대로 쓴다.
 - **파생 강도지표** — 이번 러닝의 평균/최고 심박·파워·페이스를 최대심박수·젖산 역치 대비
   %로 미리 계산해 붙인다. AI가 이전 대화 없이 JSON만 보고도 강도를 바로 판단할 수 있게
   하려는 것.
+
+## FIT SDK로 fit 파일을 읽는 방법
+
+fit은 Garmin이 정의한 바이너리 포맷이다. 직접 뜯지 않고 **Garmin 공식 FIT SDK**로 디코딩한다.
+
+### 링크
+
+| 무엇 | 주소 |
+|---|---|
+| SDK 배포처 (zip·문서·라이선스) | <https://developer.garmin.com/fit/get-the-sdk/> |
+| FIT 개요 | <https://developer.garmin.com/fit/overview/> |
+| 프로토콜 문서 (파일 헤더·레코드 구조) | <https://developer.garmin.com/fit/protocol/> |
+| Activity 파일 타입 — 러닝이 이것 | <https://developer.garmin.com/fit/file-types/activity/> |
+| 예제 모음 (Cookbook) | <https://developer.garmin.com/fit/cookbook/> |
+| Maven Central 아티팩트 | <https://central.sonatype.com/artifact/com.garmin/fit> |
+
+### 의존성 — zip을 받을 필요가 없다
+
+Garmin이 Maven Central에 공식 배포하므로 Gradle이 알아서 받아온다.
+`gradle/libs.versions.toml`:
+
+```toml
+garminFit = "21.205.0"
+garmin-fit = { group = "com.garmin", name = "fit", version.ref = "garminFit" }
+```
+
+버전을 올리려면 이 한 줄만 바꾸면 된다.
+
+### 디코딩 구조 (`app/src/main/java/.../fit/FitParser.kt`)
+
+`Decode`가 파일을 훑고, `MesgBroadcaster`가 메시지 종류별로 리스너에 뿌린다.
+
+```kotlin
+val broadcaster = MesgBroadcaster(Decode())
+broadcaster.addListener(SessionMesgListener { ... })   // 러닝 전체 요약
+broadcaster.addListener(RecordMesgListener { ... })    // 초 단위 기록
+broadcaster.run(ByteArrayInputStream(fitBytes))
+```
+
+SDK에는 한 번에 전부 담아주는 `FitDecoder`도 있지만 **쓰지 않는다.** 모든 메시지를 복사해서
+끝까지 들고 있기 때문이다 — 실측하니 33분 러닝에 10.1MB였다(리스너 방식은 0.8MB). record는
+훑으면서 10초 간격만 남기고 버린다.
+
+### 읽는 메시지
+
+| 메시지(번호) | 얻는 것 |
+|---|---|
+| `session`(18) | 러닝 전체 요약 — 거리·시간·심박·파워·러닝 다이나믹스 |
+| `lap`(19) | 랩별 요약 |
+| `record`(20) | 초 단위 기록 → 10초 간격으로 다운샘플해 `records[]`에 담는다 |
+| `zones_target`(7) | **그 러닝 당시** 최대심박수·LT 심박수·FTP |
+| `time_in_zone`(216) | 위 값의 교차검증용 사본 |
+| `user_profile`(3) | 체중·키·안정 심박 (W/kg 계산에 쓴다) |
+| `activity`(34) | 기기의 UTC 오프셋 (`local_timestamp - timestamp`) |
+
+### 필드 값을 추측하지 않는 이유 — FIT Profile
+
+필드마다 번호·타입·스케일·오프셋·단위가 SDK 안에 정의돼 있다. Garmin이 `Profile.xlsx`로
+관리하고, 그것으로 생성한 소스가 SDK jar에 그대로 들어 있다:
+
+```java
+new Field("total_distance", TotalDistanceFieldNum, 134, 100, 0, "m", false, Profile.Type.UINT32)
+//         이름                번호                 타입  scale offset 단위
+```
+
+그래서 "이 값이 m인지 cm인지"를 짐작할 필요가 없다. 예를 들어 러닝 케이던스는 단위가
+`strides/min`(양발 한 주기)이라고 적혀 있어서, spm으로 바꾸려면 ×2가 맞다는 것이 문서로
+확인된다. 빌드에 `Profile.xlsx`가 따로 필요하지는 않다 — 정의가 이미 생성 소스에 있다.
+
+**단, 프로파일에 필드가 있다고 해서 시계가 채운다는 뜻은 아니다.** 실제로 온도·좌우 접지
+균형·호흡수는 필드가 정의돼 있는데도 값이 비어 있었다. 쓰기 전에 실제 파일을 덤프해서
+확인해야 한다.
 
 ## 설치
 
@@ -83,17 +155,8 @@ Android 8.0(API 26) 이상. 소스에서 직접 빌드한 디버그 버전이 �
 
 minSdk 26 / targetSdk 37. 별도 설정이나 API 키는 필요 없다.
 
-**FIT SDK는 zip을 내려받아 `libs/`에 넣을 필요가 없다.** Garmin이 Maven Central에 공식 배포하고
-있어서 Gradle이 알아서 받아온다 — `gradle/libs.versions.toml`:
-
-```toml
-garminFit = "21.205.0"
-garmin-fit = { group = "com.garmin", name = "fit", version.ref = "garminFit" }
-```
-
-버전을 올리려면 이 한 줄만 바꾸면 된다. `developer.garmin.com`에서 받는 SDK zip에만 들어 있는
-`Profile.xlsx`는 필드 정의 원본이지만, 그 정의가 SDK 생성 소스에 그대로 담겨 있어
-(`new Field("total_distance", ..., scale 100, offset 0, "m", ...)`) 빌드에는 필요 없다.
+**FIT SDK는 zip을 내려받아 `libs/`에 넣을 필요가 없다** — Gradle이 Maven Central에서 알아서
+받아온다. [FIT SDK로 fit 파일을 읽는 방법](#fit-sdk로-fit-파일을-읽는-방법) 참고.
 
 릴리즈 빌드(`assembleRelease`)는 서명 키가 있어야 설치 가능한 APK가 나온다. 키
 (`runningpull-release.jks`)와 비밀번호(`keystore.properties`)는 저장소에 올리지 않으므로,
