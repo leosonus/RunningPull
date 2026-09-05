@@ -3,8 +3,12 @@ package io.github.leosonus.runningpull.fit
 import com.garmin.fit.ActivityMesg
 import com.garmin.fit.ActivityMesgListener
 import com.garmin.fit.Decode
+import com.garmin.fit.FileIdMesg
+import com.garmin.fit.FileIdMesgListener
+import com.garmin.fit.GarminProduct
 import com.garmin.fit.LapMesg
 import com.garmin.fit.LapMesgListener
+import com.garmin.fit.Manufacturer
 import com.garmin.fit.MesgBroadcaster
 import com.garmin.fit.RecordMesg
 import com.garmin.fit.RecordMesgListener
@@ -130,6 +134,7 @@ object FitParser {
         var zonesTarget: ZonesTargetMesg? = null
         var userProfile: UserProfileMesg? = null
         var activityMesg: ActivityMesg? = null
+        var fileId: FileIdMesg? = null
         val records = mutableListOf<RunningRecord>()
         val splits = mutableListOf<SplitPoint>()
 
@@ -149,6 +154,7 @@ object FitParser {
         broadcaster.addListener(TimeInZoneMesgListener { timeInZones.add(it) })
         broadcaster.addListener(UserProfileMesgListener { userProfile = it })
         broadcaster.addListener(ActivityMesgListener { activityMesg = it })
+        broadcaster.addListener(FileIdMesgListener { fileId = it })
         broadcaster.addListener(RecordMesgListener { record ->
             val time = record.timestamp?.date
             if (time != null) lastRecordTime = time
@@ -254,6 +260,7 @@ object FitParser {
             put("recordsIncludedCount", records.size)
             put("recordSamplingIntervalSec", RECORD_SAMPLE_INTERVAL_SEC)
             put("fitTemperatureAvailable", session.avgTemperature != null)
+            buildDeviceBlock(fileId)?.let { put("device", it) }
         })
         json.put("laps", JSONArray().apply {
             var cumulativeDistanceM = 0.0
@@ -285,6 +292,52 @@ object FitParser {
             athleteSettings = athleteSettings,
             localOffsetSec = localOffsetSec
         )
+    }
+
+    /**
+     * 이 러닝을 기록한 기기. fit의 `file_id`는 **이름이 아니라 숫자 코드**로만 갖고 있어서
+     * (예: 4315), 그대로 담으면 파일을 읽는 쪽이 알아볼 수 없다. SDK의 변환 테이블로 이름을
+     * 붙이되(`GarminProduct.getStringFromValue`), **원본 코드도 함께 남긴다** — 테이블에 없는
+     * 신형 기기가 나오면 이름은 못 붙여도 코드로 추적할 수 있어야 하기 때문이다.
+     *
+     * 기기를 담는 실질적인 이유: 이 사용자의 데이터는 두 기기에 걸쳐 있고(2025년 11월경
+     * FR55 → FR965), **FR55에는 젖산 역치 기능 자체가 없다.** 기기 정보가 없으면 그 시절
+     * 러닝에 LT가 비어 있는 것이 기기 한계인지 조회 실패인지 파일만 보고 구분할 수 없다.
+     *
+     * `getStringFromValue`는 모르는 코드에 **null이 아니라 빈 문자열**을 준다(실측). 시리얼
+     * 번호는 분석에 쓸모가 없고 기기를 특정하는 값이라 담지 않는다.
+     */
+    private fun buildDeviceBlock(fileId: FileIdMesg?): JSONObject? {
+        if (fileId == null) return null
+        val manufacturerCode = fileId.manufacturer
+        val productCode = fileId.garminProduct ?: fileId.product
+        val manufacturerName = manufacturerCode
+            ?.let { Manufacturer.getStringFromValue(it) }
+            ?.takeIf { it.isNotEmpty() }
+        // garmin_product 테이블은 제조사가 Garmin일 때만 의미가 있다.
+        val productName = productCode
+            ?.takeIf { manufacturerCode == Manufacturer.GARMIN }
+            ?.let { GarminProduct.getStringFromValue(it) }
+            ?.takeIf { it.isNotEmpty() }
+            ?: fileId.productName?.takeIf { it.isNotEmpty() }
+        if (manufacturerName == null && productName == null &&
+            manufacturerCode == null && productCode == null
+        ) {
+            return null
+        }
+        return JSONObject().apply {
+            putIfNotNull("manufacturer", manufacturerName)
+            putIfNotNull("product", productName)
+            putIfNotNull("manufacturerCode", manufacturerCode)
+            putIfNotNull("productCode", productCode)
+            put(
+                "note",
+                "이 러닝을 기록한 기기다. fit의 file_id에서 왔고, 이름은 FIT SDK의 코드→이름 " +
+                    "변환 표로 붙였다. 기기에 따라 기능 자체가 없어 특정 지표가 비는 경우가 " +
+                    "있으므로(예: Forerunner 55에는 젖산 역치 기능이 없다), 값이 없을 때 " +
+                    "조회 실패로 단정하기 전에 기기를 확인할 것."
+            )
+        }
     }
 
     private fun buildActivityBlock(session: SessionMesg, fmt: LocalTimeFormatter): JSONObject = JSONObject().apply {

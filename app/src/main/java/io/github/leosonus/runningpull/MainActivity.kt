@@ -324,8 +324,8 @@ class MainActivity : AppCompatActivity() {
                 // 최대심박수·LT 심박·LT 파워는 fit 파일이 "그 러닝 당시 설정값"을 갖고 있다.
                 // REST는 최대심박수에 날짜 파라미터가 아예 없어 항상 현재값을 주므로, fit에
                 // 값이 있으면 fit을 쓴다. 실측 근거는 skills/fit_sdk_update.md 2-3절.
-                // REST 호출은 당분간 그대로 두고 두 값을 나란히 남긴다 — 어긋나는 경우를
-                // 확인한 뒤에 호출을 걷어내려는 것.
+                // REST 호출은 걷어내지 않고 두 값을 나란히 남긴다. 실측 결과 두 값이 갈리는
+                // 것 자체가 "이 세션 중에 지표가 갱신됐다"는 신호라, 지우면 그 정보가 사라진다.
                 val fitSettings = fit.athleteSettings
                 val effectiveMaxHeartRate = fitSettings?.maxHeartRateBpm?.toDouble() ?: maxHeartRateBpm
                 val effectiveLtHeartRate = fitSettings?.thresholdHeartRateBpm?.toDouble() ?: ltHeartRate
@@ -433,13 +433,22 @@ class MainActivity : AppCompatActivity() {
                                     put("powerSource", "GARMIN_CONNECT_OR_PROFILE")
                                 }
                                 (ltMeasuredDate ?: ltPowerMeasuredDate)?.let { put("measuredDate", it) }
-                                // 대조용 Garmin 원본값. fit과 다르면 그 사이에 갱신이 있었다는 뜻.
+                                // 대조용 Garmin 원본값. 갱신일에만 fit과 갈린다(아래 노트).
                                 if (fitSettings != null) {
                                     put("garminRest", JSONObject().apply {
                                         ltHeartRate?.let { put("heartRateBpm", it) }
                                         ltPowerWatts?.let { put("powerWatts", it) }
                                         ltPowerPerKg?.let { put("powerPerKg", it) }
                                     })
+                                    // fit을 실제로 쓴 값에 한해서만 비교한다. fit에 값이 없어
+                                    // REST로 폴백했다면 두 값이 같을 수밖에 없어 노트가 무의미하다.
+                                    val heartRateDiffers = fitSettings.thresholdHeartRateBpm != null &&
+                                        ltHeartRate != null && effectiveLtHeartRate != ltHeartRate
+                                    val powerDiffers = fitSettings.functionalThresholdPowerW != null &&
+                                        ltPowerWatts != null && effectiveLtPowerWatts != ltPowerWatts
+                                    if (heartRateDiffers || powerDiffers) {
+                                        put("garminRestNote", GARMIN_REST_MISMATCH_NOTE)
+                                    }
                                 }
                             })
                         }
@@ -817,6 +826,21 @@ class MainActivity : AppCompatActivity() {
          * (REST의 최대심박수는 날짜 파라미터가 없어 항상 현재값이다).
          */
         private const val SOURCE_FIT = "FIT_ACTIVITY_FILE"
+
+        /**
+         * fit 값과 Garmin REST 값이 갈릴 때만 붙이는 설명. 실측(2026-09-05, 러닝 14건)으로
+         * 확인된 패턴은 이렇다 — 두 값은 **젖산 역치가 갱신된 날에만**, 그것도 갱신을 유발한
+         * 러닝 이전 활동에서만 갈린다. 시계가 고강도 러닝 중 새 값을 감지하면 그 러닝이 끝난
+         * 뒤 시계 설정이 바뀌므로, 같은 날 나중 활동의 fit부터 새 값이 들어 있다.
+         * 비갱신일에는 두 값이 완전히 일치한다. 근거는 skills/PROGRESS.md 참고.
+         */
+        private const val GARMIN_REST_MISMATCH_NOTE =
+            "garminRest가 위 값과 다르다 = 이 러닝 도중 또는 직후에 젖산 역치가 갱신됐다는 뜻이다. " +
+                "위 값은 이 러닝을 시작할 때 시계에 설정돼 있던 값이고, garminRest는 Garmin이 " +
+                "그 날짜에 최종 기록한 값이다. 강도 계산(derivedIntensityContext)에는 러닝 시작 " +
+                "시점 값을 쓴다 — 그 러닝 자체가 만들어낸 값을 분모로 쓰면 순환이 되기 때문이다. " +
+                "같은 날 더 늦게 시작한 활동의 fit에는 갱신된 값이 들어 있으므로, 하루치 파일을 " +
+                "함께 읽을 때 파일마다 이 값이 다를 수 있다."
 
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd", Locale.US)
 
