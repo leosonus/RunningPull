@@ -15,6 +15,7 @@ import android.webkit.CookieManager
 import android.webkit.WebStorage
 import android.webkit.WebView
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -164,6 +165,11 @@ class MainActivity : AppCompatActivity() {
 
         val statusText = findViewById<TextView>(R.id.statusText)
         val fetchButton = findViewById<Button>(R.id.fetchButton)
+        val fullRecordsCheckBox = findViewById<CheckBox>(R.id.fullRecordsCheckBox)
+        // 체크박스 자체는 clickable=false이고, 제목·설명까지 포함한 줄 전체가 토글 대상이다
+        // (작은 네모만 정확히 눌러야 하면 불편하다).
+        val fullRecordsRow = findViewById<View>(R.id.fullRecordsRow)
+        fullRecordsRow.setOnClickListener { fullRecordsCheckBox.toggle() }
         val progress = findViewById<ProgressBar>(R.id.fetchProgress)
         dateButton = findViewById(R.id.dateButton)
 
@@ -187,11 +193,22 @@ class MainActivity : AppCompatActivity() {
         statusText.setText(R.string.status_logged_in)
         fetchButton.setOnClickListener {
             fetchButton.isEnabled = false
+            // 가져오는 도중에 바꾸면 러닝마다 간격이 달라지므로 함께 잠근다. 값도 여기서
+            // 한 번만 읽어 넘겨, 진행 중 상태가 바뀌어도 이번 가져오기에는 영향이 없게 한다.
+            // 줄을 통째로 비활성화하면 터치가 막히고, alpha로 제목·설명까지 함께 흐려진다
+            // (체크박스만 isEnabled를 꺼서는 옆의 TextView가 그대로 진하게 남는다).
+            fullRecordsRow.isEnabled = false
+            fullRecordsRow.alpha = DISABLED_ALPHA
+            val recordSampleIntervalSec = if (fullRecordsCheckBox.isChecked) {
+                FitParser.FULL_RECORD_SAMPLE_INTERVAL_SEC
+            } else {
+                FitParser.DEFAULT_RECORD_SAMPLE_INTERVAL_SEC
+            }
             progress.visibility = View.VISIBLE
 
             lifecycleScope.launch {
                 try {
-                    runFetch(statusText)
+                    runFetch(statusText, recordSampleIntervalSec)
                 } catch (e: CancellationException) {
                     // 화면을 벗어나 코루틴이 취소된 것뿐이므로 오류로 표시하지 않는다.
                     throw e
@@ -205,6 +222,8 @@ class MainActivity : AppCompatActivity() {
                     statusText.text = "오류 발생: ${e.message ?: e}"
                 } finally {
                     fetchButton.isEnabled = true
+                    fullRecordsRow.isEnabled = true
+                    fullRecordsRow.alpha = 1f
                     progress.visibility = View.GONE
                 }
             }
@@ -216,7 +235,7 @@ class MainActivity : AppCompatActivity() {
      * 마지막에 성공/실패를 함께 보고한다. 다만 세션이 만료된 경우엔 이어서 해도 전부 실패하므로
      * 즉시 위로 던져 재로그인 안내로 넘긴다.
      */
-    private suspend fun runFetch(statusText: TextView) {
+    private suspend fun runFetch(statusText: TextView, recordSampleIntervalSec: Long) {
         if (!isOnline()) {
             statusText.setText(R.string.status_offline)
             return
@@ -319,7 +338,7 @@ class MainActivity : AppCompatActivity() {
                 val fitBytes = webBridge.downloadFitFile(run.id)
 
                 statusText.text = "$label \"${run.name}\" JSON으로 변환 중..."
-                val fit = FitParser.parse(fitBytes)
+                val fit = FitParser.parse(fitBytes, recordSampleIntervalSec)
 
                 // 최대심박수·LT 심박·LT 파워는 fit 파일이 "그 러닝 당시 설정값"을 갖고 있다.
                 // REST는 최대심박수에 날짜 파라미터가 아예 없어 항상 현재값을 주므로, fit에
@@ -495,8 +514,13 @@ class MainActivity : AppCompatActivity() {
                 statusText.text = "$label \"${run.name}\" 날씨 조회 중..."
                 val weatherOutcome = applyWeather(json, fit)
 
-                val fileName =
-                    "${sanitizeFileNamePart(run.name)}_${dateTimeSuffix(run.startTimeLocal)}.json"
+                // 기본 간격이 아니면 파일명으로 구분한다. 같은 러닝을 두 간격으로 받는 것이
+                // 이 기능의 흔한 사용법이라, 이름이 같으면 (1)이 붙어 어느 쪽인지 알 수 없다.
+                val intervalSuffix =
+                    if (recordSampleIntervalSec == FitParser.DEFAULT_RECORD_SAMPLE_INTERVAL_SEC) ""
+                    else "_${recordSampleIntervalSec}s"
+                val fileName = "${sanitizeFileNamePart(run.name)}_" +
+                    "${dateTimeSuffix(run.startTimeLocal)}$intervalSuffix.json"
                 DownloadSaver.saveJson(this@MainActivity, fileName, json.toString(2))
                 savedRuns.add(SavedRun(fileName, weatherOutcome))
             } catch (e: GarminAuthException) {
@@ -826,6 +850,9 @@ class MainActivity : AppCompatActivity() {
          * (REST의 최대심박수는 날짜 파라미터가 없어 항상 현재값이다).
          */
         private const val SOURCE_FIT = "FIT_ACTIVITY_FILE"
+
+        /** 가져오는 동안 옵션 줄을 흐리게 만드는 정도. */
+        private const val DISABLED_ALPHA = 0.45f
 
         /**
          * fit 값과 Garmin REST 값이 갈릴 때만 붙이는 설명. 실측(2026-09-05, 러닝 14건)으로

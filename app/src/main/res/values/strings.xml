@@ -1,6 +1,8 @@
 <resources>
     <string name="app_name">런런분석</string>
     <string name="btn_fetch">가져오기</string>
+    <string name="chk_full_records">1초 간격 저장</string>
+    <string name="chk_full_records_desc">짧은 질주 분석용 · 파일이 10배 가까이 커집니다</string>
     <string name="status_logged_in">로그인됨. 날짜를 선택하고 가져오기 버튼을 눌러 러닝 기록을 받아오세요.</string>
     <string name="status_login_failed">로그인에 실패했습니다.</string>
     <string name="welcome_title">런런분석</string>

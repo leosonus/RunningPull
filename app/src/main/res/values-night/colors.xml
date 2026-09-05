@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- values/colors.xml의 같은 이름 참고. 다크에서는 배경보다 한 단계 밝은 회색. -->
+    <color name="fetch_card_surface">#FF262626</color>
+</resources>

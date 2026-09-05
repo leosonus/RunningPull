@@ -8,4 +8,7 @@
     <color name="health_green">#8ED84A</color>
     <color name="health_blue_dark">#0679A8</color>
     <color name="health_on_primary">#FFFFFF</color>
+    <!-- 가져오기 카드 배경. colorSurface를 그대로 쓰면 elevation overlay가 primary 색조를
+         섞어 카드가 초록빛으로 물든다. 명시 색을 줘서 순수 그림자만 남긴다. -->
+    <color name="fetch_card_surface">#FFFFFFFF</color>
 </resources>

@@ -118,14 +118,29 @@ object FitParser {
     const val SPLIT_INTERVAL_M = 5000f
 
     /**
-     * records[]를 몇 초 간격으로 남길지. fit은 보통 1초마다 record가 찍히는데, 그대로 다 담으면
-     * (예: 50분 러닝 → 3000개) JSON이 지나치게 커진다. 분석에 필요한 추세는 10초 간격으로도
-     * 충분히 보이므로 다운샘플링한다. 시작 record와 마지막(결승) record는 간격에 안 맞아도
-     * 항상 포함한다.
+     * records[]를 몇 초 간격으로 남길지의 기본값. fit은 보통 1초마다 record가 찍히는데, 그대로
+     * 다 담으면 (예: 50분 러닝 → 3000개) JSON이 지나치게 커진다. 분석에 필요한 추세는 10초
+     * 간격으로도 충분히 보이므로 다운샘플링한다. 시작 record와 마지막(결승) record는 간격에
+     * 안 맞아도 항상 포함한다.
      */
-    private const val RECORD_SAMPLE_INTERVAL_SEC = 10L
+    const val DEFAULT_RECORD_SAMPLE_INTERVAL_SEC = 10L
 
-    fun parse(fitBytes: ByteArray): FitResult {
+    /**
+     * 다운샘플링 없이 fit에 있는 record를 전부 담을 때 쓰는 간격. 10~20초짜리 질주처럼 짧은
+     * 구간은 10초 간격으로는 한두 점밖에 안 남아 분석이 안 되기 때문에 열어 둔 선택지다.
+     * 대신 파일이 10배 가까이 커진다(50분 러닝 기준 약 169KB → 1.5MB).
+     */
+    const val FULL_RECORD_SAMPLE_INTERVAL_SEC = 1L
+
+    /**
+     * @param recordSampleIntervalSec records[]를 남길 간격(초). 이 값은 JSON의
+     *   `source.recordSamplingIntervalSec`에 그대로 기록되므로, 파일만 봐도 어떤 간격으로
+     *   받은 것인지 알 수 있다.
+     */
+    fun parse(
+        fitBytes: ByteArray,
+        recordSampleIntervalSec: Long = DEFAULT_RECORD_SAMPLE_INTERVAL_SEC
+    ): FitResult {
         val sessions = mutableListOf<SessionMesg>()
         val laps = mutableListOf<LapMesg>()
         // 개수가 1~80개뿐이라 그대로 담아도 부담이 없다. record처럼 수천 개인 메시지만
@@ -174,7 +189,7 @@ object FitParser {
                 val threshold = nextRecordSampleTimeMs
                 if (threshold == null || time.time >= threshold) {
                     records.add(runningRecord)
-                    nextRecordSampleTimeMs = time.time + RECORD_SAMPLE_INTERVAL_SEC * 1000L
+                    nextRecordSampleTimeMs = time.time + recordSampleIntervalSec * 1000L
                 }
             }
 
@@ -258,7 +273,7 @@ object FitParser {
         json.put("source", JSONObject().apply {
             put("fitRecordCount", totalFitRecordCount)
             put("recordsIncludedCount", records.size)
-            put("recordSamplingIntervalSec", RECORD_SAMPLE_INTERVAL_SEC)
+            put("recordSamplingIntervalSec", recordSampleIntervalSec)
             put("fitTemperatureAvailable", session.avgTemperature != null)
             buildDeviceBlock(fileId)?.let { put("device", it) }
         })
@@ -402,7 +417,7 @@ object FitParser {
     }
 
     /** records[]에 남은 항목들의 타임스탬프 간격 중앙값(초). 다운샘플링 결과라 보통
-     * RECORD_SAMPLE_INTERVAL_SEC(10)에 가깝다. */
+     * 요청한 간격(parse의 recordSampleIntervalSec)에 가깝다. */
     private fun buildTimingBlock(
         session: SessionMesg,
         records: List<RunningRecord>,
