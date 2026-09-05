@@ -399,7 +399,6 @@ class GarminWebBridge(private val webView: WebView) {
         val start = LocalDate.parse(date).minusDays(VO2MAX_LOOKBACK_DAYS).toString()
         val url = "https://connect.garmin.com/gc-api/metrics-service/metrics/maxmet/daily/$start/$date"
         val body = fetchViaPage(url, binary = false)
-        Log.d(TAG, "vo2max raw response: ${body.take(600)}")
 
         val array = try {
             JSONArray(body)
@@ -437,7 +436,6 @@ class GarminWebBridge(private val webView: WebView) {
         val url = "https://connect.garmin.com/gc-api/biometric-service/stats/$metric" +
             "/range/$start/$date?$query"
         val body = fetchViaPage(url, binary = false)
-        Log.d(TAG, "$metric raw response: ${body.take(600)}")
 
         val array = try {
             JSONArray(body)
@@ -490,7 +488,6 @@ class GarminWebBridge(private val webView: WebView) {
      */
     suspend fun fetchMaximumHeartRate(): Double? {
         val body = fetchViaPage("https://connect.garmin.com/gc-api/biometric-service/heartRateZones", binary = false)
-        Log.d(TAG, "heartRateZones raw response: ${body.take(600)}")
 
         val array = try {
             JSONArray(body)
